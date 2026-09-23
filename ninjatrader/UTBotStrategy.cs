@@ -20,7 +20,7 @@ namespace NinjaTrader.NinjaScript.Strategies
     public class UTBotStrategy : Strategy
     {
         private ATR atr;
-        private HeikinAshi heikinAshi;
+        private HeikenAshi heikinAshi;
 
         // Series persistente del ATR Trailing Stop (equivalente a xATRTrailingStop en Pine)
         private Series<double> trailStop;
@@ -95,7 +95,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EnableShortEntries = true;
                 UseAtrTrailingStopExit = true;
 
-                AddPlot(new Stroke(Brushes.DodgerBlue, 2), PlotStyle.Line, "UTBotTrailStop");
+                AddPlot(Brushes.DodgerBlue, "UTBotTrailStop");
             }
             else if (State == State.Configure)
             {
@@ -103,7 +103,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (State == State.DataLoaded)
             {
                 atr = ATR(AtrPeriod);
-                heikinAshi = HeikinAshi();
+                heikinAshi = HeikenAshi();
                 trailStop = new Series<double>(this);
             }
         }
