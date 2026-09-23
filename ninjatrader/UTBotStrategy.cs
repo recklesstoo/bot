@@ -20,7 +20,6 @@ namespace NinjaTrader.NinjaScript.Strategies
     public class UTBotStrategy : Strategy
     {
         private ATR atr;
-        private HeikenAshi heikinAshi;
 
         // Series persistente del ATR Trailing Stop (equivalente a xATRTrailingStop en Pine)
         private Series<double> trailStop;
@@ -103,7 +102,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (State == State.DataLoaded)
             {
                 atr = ATR(AtrPeriod);
-                heikinAshi = HeikenAshi();
                 trailStop = new Series<double>(this);
             }
         }
@@ -116,8 +114,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             double atrValue = atr[0];
             double nLoss = KeyValue * atrValue;
 
-            double src = UseHeikinAshi ? heikinAshi.HAClose[0] : Close[0];
-            double srcPrev = CurrentBar > 0 ? (UseHeikinAshi ? heikinAshi.HAClose[1] : Close[1]) : src;
+            // HA_Close = (Open+High+Low+Close)/4, único valor de la vela Heikin Ashi
+            // que no depende de la recursión de HA_Open, así que se calcula directo.
+            double src = UseHeikinAshi ? (Open[0] + High[0] + Low[0] + Close[0]) / 4.0 : Close[0];
+            double srcPrev = CurrentBar > 0
+                ? (UseHeikinAshi ? (Open[1] + High[1] + Low[1] + Close[1]) / 4.0 : Close[1])
+                : src;
 
             double prevTrail = CurrentBar > 0 ? trailStop[1] : 0.0;
 
