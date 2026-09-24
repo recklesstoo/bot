@@ -191,6 +191,11 @@ def write_log(req: DecideRequest, decision: Decision) -> None:
         log.warning("No se pudo escribir el log: %s", e)
 
 
+@app.get("/")
+def root():
+    return {"status": "Servidor del bot funcionando", "health": "/health", "decide": "POST /decide"}
+
+
 @app.get("/health")
 def health():
     try:
