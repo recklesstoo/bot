@@ -121,6 +121,8 @@
       <button class="b-blue" id="btn-test">🧠 Probar IA</button>
       <button id="btn-pause">⏸ Pausar IA</button>
     </div>
+    <div class="sub">Modo de decisión en vivo</div>
+    <select id="mode-select" style="width:100%"></select>
     <div class="sub">Órdenes manuales (1 contrato, con stop y target automáticos)</div>
     <div class="btns">
       <button class="b-buy" id="btn-buy">▲ Comprar</button>
@@ -155,7 +157,9 @@
       <input type="file" id="bt-upload" accept=".txt,.csv" hidden>
       <label>Estrategia
         <select id="bt-strategy">
-          <option value="qwen">IA (Ollama)</option>
+          <option value="setups">Setups: ORB + barrido</option>
+          <option value="setups_ia">Setups + filtro IA (Ollama)</option>
+          <option value="qwen">IA libre (Ollama)</option>
           <option value="ema">Cruce EMA (referencia)</option>
           <option value="random">Azar (referencia)</option>
         </select>
@@ -179,6 +183,9 @@
 
     <div id="bt-results" hidden>
       <div class="stats" style="margin-top:14px" id="bt-stats"></div>
+      <div class="sub">Diseño vs validación (lo que cuenta es la validación: días que no se usaron para ajustar nada)</div>
+      <div class="table-wrap"><table><thead><tr><th>Tramo</th><th>Trades</th><th>PnL neto</th><th>Aciertos</th><th>Factor benef.</th><th>Esperanza</th><th>Máx. caída</th></tr></thead>
+        <tbody id="bt-segments"></tbody></table></div>
       <div class="bt-grid">
         <div><div class="sub">Curva de capital (PnL acumulado por operación cerrada)</div><div class="chart" id="bt-equity"></div></div>
         <div><div class="sub">PnL por día</div><div class="chart" id="bt-daily"></div></div>
@@ -243,7 +250,11 @@ function render() {
        s.ollama.ok ? "Ollama · " + s.model : (/no descargado/.test(oErr) ? "Ollama: falta el modelo" : "Ollama: sin conexión"), oErr || undefined);
   pill("p-nt", s.nt.connected ? "ok" : "bad",
        s.nt.connected ? "NinjaTrader conectado" : (nt ? `NinjaTrader desconectado (hace ${Math.round(s.nt.seconds_ago)} s)` : "NinjaTrader sin conectar"));
-  pill("p-ai", s.paused ? "warn" : "ok", s.paused ? "IA en pausa" : "IA activa");
+  pill("p-ai", s.paused ? "warn" : "ok", (s.paused ? "En pausa · " : "Activo · ") + (s.modes?.[s.mode] || s.mode));
+  const ms = $("mode-select");
+  if (ms.options.length !== Object.keys(s.modes || {}).length)
+    ms.innerHTML = Object.entries(s.modes || {}).map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join("");
+  if (document.activeElement !== ms) ms.value = s.mode;
   $("btn-pause").textContent = s.paused ? "▶ Reanudar IA" : "⏸ Pausar IA";
 
   const banner = $("banner");
@@ -309,6 +320,12 @@ $("btn-ping").onclick = () => command("PING");
 $("btn-buy").onclick  = () => command("BUY",  "¿Enviar orden de COMPRA a mercado (1 contrato)?");
 $("btn-sell").onclick = () => command("SELL", "¿Enviar orden de VENTA a mercado (1 contrato)?");
 $("btn-exit").onclick = () => command("EXIT", "¿Cerrar la posición abierta?");
+
+$("mode-select").onchange = async ev => {
+  const mode = ev.target.value, label = ev.target.selectedOptions[0].textContent;
+  if (!confirm(`¿Cambiar el modo de decisión en vivo a "${label}"?`)) { ev.target.value = state.mode; return; }
+  try { await post("/api/mode", { mode }); show("Modo en vivo: " + label); refresh(); } catch (e) { show("❌ " + e.message); }
+};
 
 $("btn-pause").onclick = async () => {
   try { const r = await post("/api/pause", { paused: !state.paused }); show(r.paused ? "⏸ IA en pausa: no abrirá operaciones nuevas (los stops siguen activos)." : "▶ IA reanudada."); refresh(); }
@@ -439,6 +456,14 @@ function renderBtResult(res) {
     tile("Bloqueos riesgo", s.blocked.riesgo_diario + s.blocked.max_trades) +
     tile("Bloqueos confianza", s.blocked.confianza) +
     tile("Comisiones", fmtMoney(s.commissions));
+  const seg = res.segments || {}, rowOf = (name, x) => x ? `<tr><td>${name}</td><td class="num">${x.trades}</td>
+    <td class="num ${x.net_pnl >= 0 ? "pos" : "neg"}">${fmtMoney(x.net_pnl)}</td><td class="num">${(x.win_rate * 100).toFixed(1)}%</td>
+    <td class="num">${x.profit_factor ?? "—"}</td><td class="num ${x.expectancy >= 0 ? "pos" : "neg"}">${fmtMoney(x.expectancy)}</td>
+    <td class="num neg">${fmtMoney(x.max_drawdown)}</td></tr>` : "";
+  let segHtml = seg.split_date ? rowOf(`Diseño (hasta ${seg.split_date})`, seg.design) + rowOf(`<b>Validación</b> (desde ${seg.split_date})`, seg.validation) : "";
+  Object.entries(res.by_setup || {}).forEach(([k, v]) => {
+    segHtml += rowOf(`&nbsp;&nbsp;${esc(k)} · diseño`, v.design) + rowOf(`&nbsp;&nbsp;${esc(k)} · <b>validación</b>`, v.validation); });
+  $("bt-segments").innerHTML = segHtml || '<tr><td colspan="7" class="empty">Periodo demasiado corto para separar diseño y validación.</td></tr>';
   equityChart($("bt-equity"), res.equity);
   dailyChart($("bt-daily"), res.daily);
   $("bt-trades").innerHTML = res.trades.slice(-100).reverse().map(t => `<tr>
@@ -475,7 +500,8 @@ async function btRefresh() {
 async function btFiles(select) {
   const files = await fetch("/api/backtest/files").then(r => r.json()).catch(() => []);
   const sel = $("bt-file"), cur = select || sel.value;
-  sel.innerHTML = files.length ? files.map(f => `<option value="${esc(f.name)}">${esc(f.name)} (${f.size_mb} MB)</option>`).join("")
+  sel.innerHTML = files.length ? (files.length > 1 ? '<option value="*">Todos los archivos (contratos unidos)</option>' : "")
+                               + files.map(f => `<option value="${esc(f.name)}">${esc(f.name)} (${f.size_mb} MB)</option>`).join("")
                                : '<option value="">— sube un archivo —</option>';
   if (cur && files.some(f => f.name === cur)) sel.value = cur;
 }

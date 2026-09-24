@@ -62,7 +62,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				ServerUrl         = "http://127.0.0.1:8000/decide";
 				ApiToken          = "";
 				RequestTimeoutSec = 20;
-				BarsToSend        = 100;
+				BarsToSend        = 1500;   // ~5 días de velas de 5 min: día anterior, noche y volumen relativo
 
 				Quantity          = 1;
 				AllowShorts       = true;
@@ -193,20 +193,24 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (action != "EXIT" && confidence < MinConfidence)
 				return;
 
-			Execute(action);
+			// Si la decisión viene de un setup, trae su stop estructural (y objetivo) en ticks
+			Execute(action, (int)JsonNumber(response, "stop_ticks"), (int)JsonNumber(response, "target_ticks"));
 		}
 
-		private string Execute(string action)
+		// setupStop/setupTarget > 0: stop estructural del setup. 0: stop por ATR (IA libre y órdenes manuales).
+		private string Execute(string action, int setupStop = 0, int setupTarget = 0)
 		{
 			MarketPosition mp = Position.MarketPosition;
+			int stopTicks, targetTicks;
 
 			switch (action)
 			{
 				case "BUY":
 					if (mp == MarketPosition.Long) return "Ya hay posición larga";
 					if (mp == MarketPosition.Short && !AllowReversal) { ExitShort(Position.Quantity, "AI Exit", ShortSignal); return "Cerrando corto"; }
-					if (!CanOpen()) return "Bloqueada por reglas de riesgo (ver registro)";
-					SetBracket(LongSignal, StopTicks());
+					if (!Bracket(setupStop, setupTarget, out stopTicks, out targetTicks)) return "Stop del setup mayor que el máximo permitido";
+					if (!CanOpen(stopTicks)) return "Bloqueada por reglas de riesgo (ver registro)";
+					SetBracket(LongSignal, stopTicks, targetTicks);
 					EnterLong(Quantity, LongSignal);
 					tradesToday++;
 					return "Orden de compra enviada";
@@ -215,8 +219,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 					if (mp == MarketPosition.Short) return "Ya hay posición corta";
 					if (mp == MarketPosition.Long && (!AllowReversal || !AllowShorts)) { ExitLong(Position.Quantity, "AI Exit", LongSignal); return "Cerrando largo"; }
 					if (!AllowShorts) return "Cortos deshabilitados";
-					if (!CanOpen()) return "Bloqueada por reglas de riesgo (ver registro)";
-					SetBracket(ShortSignal, StopTicks());
+					if (!Bracket(setupStop, setupTarget, out stopTicks, out targetTicks)) return "Stop del setup mayor que el máximo permitido";
+					if (!CanOpen(stopTicks)) return "Bloqueada por reglas de riesgo (ver registro)";
+					SetBracket(ShortSignal, stopTicks, targetTicks);
 					EnterShort(Quantity, ShortSignal);
 					tradesToday++;
 					return "Orden de venta enviada";
@@ -229,7 +234,29 @@ namespace NinjaTrader.NinjaScript.Strategies
 			return "Sin acción";
 		}
 
-		private bool CanOpen()
+		// Calcula stop y objetivo en ticks. Con setup: el stop nunca es más ajustado que el
+		// mínimo (se amplía y el objetivo se escala para mantener el R:R) y, si supera el
+		// máximo, NO se opera (recortar un stop estructural rompe la idea del setup).
+		private bool Bracket(int setupStop, int setupTarget, out int stopTicks, out int targetTicks)
+		{
+			double atrTicks = atr[0] / TickSize;
+			if (setupStop > 0)
+			{
+				stopTicks = Math.Max(MinStopTicks, setupStop);
+				targetTicks = setupTarget > 0 ? (int)Math.Round(setupTarget * (double)stopTicks / setupStop) : stopTicks * 2;
+				if (stopTicks > MaxStopTicks)
+				{
+					Log(string.Format("Setup descartado: stop de {0} ticks > máximo {1}.", stopTicks, MaxStopTicks));
+					return false;
+				}
+				return true;
+			}
+			stopTicks = Math.Min(MaxStopTicks, Math.Max(MinStopTicks, (int)Math.Round(atrTicks * StopAtrMult)));
+			targetTicks = Math.Max(stopTicks, (int)Math.Round(atrTicks * TargetAtrMult));
+			return true;
+		}
+
+		private bool CanOpen(int stopTicks)
 		{
 			if (tradesToday >= MaxTradesPerDay)
 			{
@@ -240,7 +267,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			// Solo se abre si, tocando el stop, el día no supera la pérdida máxima.
 			// Si hay una posición contraria abierta (reversión), su PnL flotante ya cuenta.
 			double budget = MaxDailyLoss + DailyPnl();
-			double risk   = StopTicks() * TickSize * Instrument.MasterInstrument.PointValue * Quantity;
+			double risk   = stopTicks * TickSize * Instrument.MasterInstrument.PointValue * Quantity;
 			if (risk > budget)
 			{
 				Log(string.Format("Entrada bloqueada: riesgo del stop {0:C} > margen restante del día {1:C}.", risk, budget));
@@ -249,19 +276,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			return true;
 		}
 
-		// Stop en ticks a partir del ATR, acotado entre el mínimo y el máximo.
-		private int StopTicks()
-		{
-			double atrTicks = atr[0] / TickSize;
-			return Math.Min(MaxStopTicks, Math.Max(MinStopTicks, (int)Math.Round(atrTicks * StopAtrMult)));
-		}
-
 		// Stop y target se fijan ANTES de la entrada, así la orden de protección
 		// sale en cuanto se llena la entrada.
-		private void SetBracket(string signal, int stopTicks)
+		private void SetBracket(string signal, int stopTicks, int targetTicks)
 		{
-			double atrTicks = atr[0] / TickSize;
-			int targetTicks = Math.Max(stopTicks, (int)Math.Round(atrTicks * TargetAtrMult));
 			SetStopLoss(signal, CalculationMode.Ticks, stopTicks, false);
 			SetProfitTarget(signal, CalculationMode.Ticks, targetTicks);
 			Log(string.Format("{0}: stop={1} ticks, target={2} ticks", signal, stopTicks, targetTicks));
@@ -448,11 +466,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 			sb.AppendFormat(ic, "\"daily_pnl\":{0:0.##},", dailyPnl);
 			sb.AppendFormat(ic, "\"trades_today\":{0},", tradesToday);
 			sb.AppendFormat(ic, "\"allow_shorts\":{0},", AllowShorts ? "true" : "false");
+			sb.AppendFormat(ic, "\"start_time\":{0},\"end_time\":{1},", StartTime, EndTime);
 			sb.Append("\"bars\":[");
 			for (int i = BarsToSend - 1; i >= 0; i--)
 			{
 				sb.AppendFormat(ic, "{{\"t\":\"{0:yyyy-MM-ddTHH:mm:ss}\",\"o\":{1},\"h\":{2},\"l\":{3},\"c\":{4},\"v\":{5}}}",
-					Time[i], Open[i], High[i], Low[i], Close[i], Volume[i]);
+					NewYorkTime(Time[i]), Open[i], High[i], Low[i], Close[i], Volume[i]);   // hora de NY, como el backtest
 				if (i > 0) sb.Append(',');
 			}
 			sb.Append("]}");
@@ -513,7 +532,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		public int RequestTimeoutSec { get; set; }
 
 		[NinjaScriptProperty]
-		[Range(60, 500)]
+		[Range(60, 5000)]
 		[Display(Name = "Velas a enviar", Order = 4, GroupName = "1. IA")]
 		public int BarsToSend { get; set; }
 

@@ -26,6 +26,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from context import add_context
 from indicators import add_indicators
 
 NY_TZ = "America/New_York"
@@ -45,6 +46,32 @@ def load_nt_export(path, source_tz: str = "UTC") -> pd.DataFrame:
     df = df.drop(columns="time").set_index(idx)
     df.index.name = "time"
     return df.astype(float)
+
+
+def merge_contracts(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    """Une varios contratos (p. ej. 06-26 y 09-26) en una serie continua.
+    Cambia de contrato el primer día de sesión en que el nuevo tiene más volumen
+    y ajusta los precios anteriores por la diferencia entre contratos (back-adjust)."""
+    frames = sorted((f for f in frames if len(f)), key=lambda f: f.index[0])
+    out = frames[0]
+    for nxt in frames[1:]:
+        sess = lambda d: (d.index + pd.Timedelta(hours=6)).normalize()
+        v_old = out["volume"].groupby(sess(out)).sum()
+        v_new = nxt["volume"].groupby(sess(nxt)).sum()
+        both = v_old.index.intersection(v_new.index)
+        roll_days = [d for d in both if v_new[d] > v_old[d]]
+        roll = roll_days[0] if roll_days else (both[-1] if len(both) else sess(nxt)[0])
+        roll_ts = roll - pd.Timedelta(hours=6)                 # 18:00 NY del día anterior
+        common = out.index.intersection(nxt.index)
+        before = common[common < roll_ts]
+        # diferencia entre contratos justo antes del cambio (o, si no se solapan antes, al empezar a solaparse)
+        ref = before[-60:] if len(before) else common[:60]
+        offset = float((nxt.loc[ref, "close"] - out.loc[ref, "close"]).median()) if len(ref) else 0.0
+        old = out[out.index < roll_ts].copy()
+        old[["open", "high", "low", "close"]] += offset
+        out = pd.concat([old, nxt[nxt.index >= roll_ts]])
+        out.attrs["rolls"] = out.attrs.get("rolls", []) + [{"date": str(roll.date()), "offset": round(offset, 2)}]
+    return out
 
 
 def resample(df1: pd.DataFrame, minutes: int = 5) -> pd.DataFrame:
@@ -91,6 +118,7 @@ class Trade:
     stop: float = 0.0
     target: float = 0.0
     reason: str = ""
+    setup: str = ""
 
 
 # ===========
@@ -172,7 +200,7 @@ class Backtester:
                  cancel: Optional[threading.Event] = None):
         self.p = params
         self.df1 = df1
-        self.df5 = add_indicators(resample(df1, params.timeframe_min))
+        self.df5 = add_context(add_indicators(resample(df1, params.timeframe_min)))
         self.strategy = strategy
         self.trade_from = df1.attrs.get("trade_from")
         self.progress = progress
@@ -183,7 +211,8 @@ class Backtester:
         self.realized = 0.0
         self.equity: List[tuple] = []
         self.decisions: Dict[str, int] = {"BUY": 0, "SELL": 0, "HOLD": 0, "EXIT": 0}
-        self.blocked: Dict[str, int] = {"confianza": 0, "max_trades": 0, "riesgo_diario": 0, "dia_detenido": 0}
+        self.blocked: Dict[str, int] = {"confianza": 0, "max_trades": 0, "riesgo_diario": 0, "dia_detenido": 0, "stop_grande": 0}
+        self._pending: dict = {}
         self.day_stats: Dict[str, dict] = {}
 
     # --- utilidades ---
@@ -208,7 +237,9 @@ class Backtester:
     def _daily_pnl(self, price: float) -> float:
         return self.realized - self.day_start_realized + self._unrealized(price)
 
-    def _stop_ticks(self, atr: float) -> int:
+    def _stop_ticks(self, atr: float, stop_pts: Optional[float] = None) -> int:
+        if stop_pts:   # stop estructural del setup: nunca más ajustado que el mínimo
+            return max(self.p.min_stop_ticks, int(math.ceil(stop_pts / self.p.tick_size)))
         ticks = int(round(atr / self.p.tick_size * self.p.stop_atr_mult)) if atr > 0 else self.p.min_stop_ticks
         return min(self.p.max_stop_ticks, max(self.p.min_stop_ticks, ticks))
 
@@ -217,12 +248,17 @@ class Backtester:
         return price + s if side_buy else price - s
 
     # --- órdenes ---
-    def _open(self, side: str, t, open_price: float, atr: float, reason: str):
-        stop_ticks = self._stop_ticks(atr)
-        target_ticks = max(stop_ticks, int(round(atr / self.p.tick_size * self.p.target_atr_mult)))
+    def _open(self, side: str, t, open_price: float, atr: float, reason: str, pending: Optional[dict] = None):
+        pending = pending or {}
+        stop_pts, target_pts = pending.get("stop_pts"), pending.get("target_pts")
+        stop_ticks = self._stop_ticks(atr, stop_pts)
+        if stop_pts and target_pts:   # mantiene la relación riesgo/beneficio del setup
+            target_ticks = int(round(target_pts / stop_pts * stop_ticks))
+        else:
+            target_ticks = max(stop_ticks, int(round(atr / self.p.tick_size * self.p.target_atr_mult)))
         fill = self._slip(open_price, side == "LONG")
         sd, td = stop_ticks * self.p.tick_size, target_ticks * self.p.tick_size
-        self.pos = Trade(side=side, entry_time=str(t), entry_price=fill, reason=reason,
+        self.pos = Trade(side=side, entry_time=str(t), entry_price=fill, reason=reason, setup=pending.get("setup", ""),
                          stop=fill - sd if side == "LONG" else fill + sd,
                          target=fill + td if side == "LONG" else fill - td)
         self.trades_today += 1
@@ -256,15 +292,18 @@ class Backtester:
                 return True
         return False
 
-    def _can_open(self, price: float, atr: float) -> Optional[str]:
+    def _can_open(self, price: float, atr: float, stop_pts: Optional[float] = None) -> Optional[str]:
         if self.trades_today >= self.p.max_trades_per_day:
             return "max_trades"
-        risk = self._stop_ticks(atr) * self.p.tick_size * self.p.point_value * self.p.quantity
+        ticks = self._stop_ticks(atr, stop_pts)
+        if stop_pts and ticks > self.p.max_stop_ticks:
+            return "stop_grande"
+        risk = ticks * self.p.tick_size * self.p.point_value * self.p.quantity
         if risk > self.p.max_daily_loss + self._daily_pnl(price):
             return "riesgo_diario"
         return None
 
-    def _plan(self, action: str, price: float, atr: float) -> Optional[str]:
+    def _plan(self, action: str, price: float, atr: float, stop_pts: Optional[float] = None) -> Optional[str]:
         """Traduce la decisión a una orden, igual que Execute() en NinjaTrader."""
         side = self.pos.side if self.pos else "FLAT"
         if action == "BUY":
@@ -283,7 +322,7 @@ class Backtester:
             return "EXIT" if self.pos else None
         else:
             return None
-        why = self._can_open(price, atr)
+        why = self._can_open(price, atr, stop_pts)
         if why:
             self.blocked[why] += 1
             return None
@@ -331,8 +370,9 @@ class Backtester:
                     if action in ("BUY", "SELL"):
                         self.blocked["confianza"] += 1
                 else:
-                    order = self._plan(action, price, atr)
+                    order = self._plan(action, price, atr, d.get("stop_pts"))
                     self._reason = d.get("reason", "")
+                    self._pending = d
                 done += 1
                 if self.progress and done % 5 == 0:
                     self.progress(done, total)
@@ -356,9 +396,9 @@ class Backtester:
                         if self.pos:
                             self._close(mt, self._slip(mb.open, self.pos.side == "SHORT"), "Señal/regla")
                     if order in ("BUY", "REVERSE_BUY"):
-                        self._open("LONG", mt, mb.open, atr, getattr(self, "_reason", ""))
+                        self._open("LONG", mt, mb.open, atr, getattr(self, "_reason", ""), self._pending)
                     elif order in ("SELL", "REVERSE_SELL"):
-                        self._open("SHORT", mt, mb.open, atr, getattr(self, "_reason", ""))
+                        self._open("SHORT", mt, mb.open, atr, getattr(self, "_reason", ""), self._pending)
                 if self.pos:
                     self._check_bracket(mt, mb)
 
@@ -370,22 +410,22 @@ class Backtester:
         return self.report()
 
     # --- resultados ---
-    def report(self) -> dict:
-        pnls = [t.pnl for t in self.trades]
+    def _stats(self, trades: List[Trade]) -> dict:
+        pnls = [t.pnl for t in trades]
         wins, losses = [x for x in pnls if x > 0], [x for x in pnls if x <= 0]
-        eq = np.cumsum(pnls) if pnls else np.array([0.0])
-        peak = np.maximum.accumulate(np.concatenate([[0.0], eq]))
-        max_dd = float((np.concatenate([[0.0], eq]) - peak).min())
+        eq = np.concatenate([[0.0], np.cumsum(pnls)]) if pnls else np.array([0.0])
+        max_dd = float((eq - np.maximum.accumulate(eq)).min())
         by_day: Dict[str, float] = {}
-        for t in self.trades:
+        for t in trades:
             by_day[t.exit_time[:10]] = by_day.get(t.exit_time[:10], 0.0) + t.pnl
         days = list(by_day.values())
         gp, gl = sum(wins), -sum(losses)
-        stats = {
+        pf = round(gp / gl, 2) if gl > 0 else None
+        return {
             "trades": len(pnls),
             "net_pnl": round(sum(pnls), 2),
             "win_rate": round(len(wins) / len(pnls), 3) if pnls else 0.0,
-            "profit_factor": round(gp / gl, 2) if gl > 0 else (None if gp == 0 else float("inf")),
+            "profit_factor": pf,
             "avg_win": round(float(np.mean(wins)), 2) if wins else 0.0,
             "avg_loss": round(float(np.mean(losses)), 2) if losses else 0.0,
             "expectancy": round(float(np.mean(pnls)), 2) if pnls else 0.0,
@@ -395,18 +435,38 @@ class Backtester:
             "red_days": sum(1 for d in days if d <= 0),
             "best_day": round(max(days), 2) if days else 0.0,
             "worst_day": round(min(days), 2) if days else 0.0,
-            "long_trades": sum(1 for t in self.trades if t.side == "LONG"),
-            "short_trades": sum(1 for t in self.trades if t.side == "SHORT"),
-            "stops": sum(1 for t in self.trades if t.exit_reason == "Stop"),
-            "targets": sum(1 for t in self.trades if t.exit_reason == "Target"),
+            "long_trades": sum(1 for t in trades if t.side == "LONG"),
+            "short_trades": sum(1 for t in trades if t.side == "SHORT"),
+            "stops": sum(1 for t in trades if t.exit_reason == "Stop"),
+            "targets": sum(1 for t in trades if t.exit_reason == "Target"),
             "commissions": round(len(pnls) * 2 * self.p.commission_per_side * self.p.quantity, 2),
-            "decisions": self.decisions,
-            "blocked": self.blocked,
-            "period": [str(self.trade_from if self.trade_from is not None else self.df5.index[0]), str(self.df5.index[-1])],
         }
-        if stats["profit_factor"] == float("inf"):
-            stats["profit_factor"] = None
-        return {"stats": stats, "equity": self.equity, "daily": by_day,
+
+    def report(self, design_frac: float = 0.6) -> dict:
+        stats = self._stats(self.trades)
+        start = self.trade_from if self.trade_from is not None else self.df5.index[0]
+        stats.update(decisions=self.decisions, blocked=self.blocked, period=[str(start), str(self.df5.index[-1])])
+
+        # Diseño vs validación: los primeros X% de días sirven para diseñar/ajustar,
+        # el resto es "fuera de muestra". Solo el tramo de validación dice si hay edge.
+        days = sorted({d for d in self.df5.index[self.df5.index >= start].normalize()})
+        split = str(days[int(len(days) * design_frac)].date()) if len(days) > 4 else None
+        segments = {}
+        if split:
+            segments = {"split_date": split,
+                        "design": self._stats([t for t in self.trades if t.entry_time[:10] < split]),
+                        "validation": self._stats([t for t in self.trades if t.entry_time[:10] >= split])}
+        by_setup = {}
+        for name in sorted({t.setup for t in self.trades if t.setup}):
+            tr = [t for t in self.trades if t.setup == name]
+            by_setup[name] = {"all": self._stats(tr)}
+            if split:
+                by_setup[name]["design"] = self._stats([t for t in tr if t.entry_time[:10] < split])
+                by_setup[name]["validation"] = self._stats([t for t in tr if t.entry_time[:10] >= split])
+        by_day: Dict[str, float] = {}
+        for t in self.trades:
+            by_day[t.exit_time[:10]] = round(by_day.get(t.exit_time[:10], 0.0) + t.pnl, 2)
+        return {"stats": stats, "segments": segments, "by_setup": by_setup, "equity": self.equity, "daily": by_day,
                 "trades": [asdict(t) for t in self.trades], "params": asdict(self.p),
                 "cancelled": self.cancel.is_set()}
 
@@ -424,8 +484,37 @@ def slice_days(df1: pd.DataFrame, days: Optional[int]) -> pd.DataFrame:
     return out
 
 
+def make_setups_strategy(setup_params=None, llm_filter: Optional[Callable[[dict, dict], dict]] = None) -> Strategy:
+    """Playbook: las reglas detectan el setup (con su stop estructural); opcionalmente
+    la IA decide si tomarlo o saltarlo según el contexto."""
+    from setups import SetupDetector
+    det = SetupDetector(setup_params)
+
+    def strat(ctx: dict) -> dict:
+        cands = det.detect(ctx["row"], ctx["prev"])      # se llama siempre: lleva la cuenta del día
+        if ctx["position"] != "FLAT" or not cands:
+            return {"action": "HOLD", "confidence": 0.0, "reason": ""}
+        c = cands[0]
+        d = {"action": "BUY" if c["side"] == "LONG" else "SELL", "confidence": 1.0,
+             "reason": f"[{c['setup']}] {c['why']}", "setup": c["setup"],
+             "stop_pts": c["stop_pts"], "target_pts": c["target_pts"]}
+        if llm_filter:
+            v = llm_filter(ctx, c)
+            d["confidence"] = float(v.get("confidence", 0.0))
+            d["reason"] = f"[{c['setup']}] {v.get('reason', '')}"
+            if not v.get("take", False):
+                d["action"] = "HOLD"
+        return d
+    return strat
+
+
 def build_strategy(name: str, cache_dir: Optional[Path] = None) -> Strategy:
     name = name.lower()
+    if name == "setups":
+        return make_setups_strategy()
+    if name == "setups_ia":
+        import playbook
+        return make_setups_strategy(llm_filter=playbook.make_llm_filter(cache_dir))
     if name == "ema":
         return ema_strategy
     if name == "random":
@@ -440,7 +529,7 @@ def build_strategy(name: str, cache_dir: Optional[Path] = None) -> Strategy:
 def main():
     ap = argparse.ArgumentParser(description="Backtest del bot con datos de NinjaTrader")
     ap.add_argument("data")
-    ap.add_argument("--strategy", default="ema", choices=["ema", "random", "qwen"])
+    ap.add_argument("--strategy", default="ema", choices=["ema", "random", "qwen", "setups", "setups_ia"])
     ap.add_argument("--days", type=int, default=0, help="Solo los últimos N días")
     ap.add_argument("--tz", default="UTC", help="Zona horaria del archivo (NinjaTrader exporta en UTC)")
     ap.add_argument("--min-confidence", type=float, default=Params.min_confidence)

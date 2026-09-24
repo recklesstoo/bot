@@ -33,7 +33,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "LOG_FILE", tmp_path / "log.jsonl")
     monkeypatch.setattr(server, "API_TOKEN", "")
     monkeypatch.setattr(server, "ALLOWED_HOSTS", {"testserver", "127.0.0.1", "localhost"})
-    server.STATE.update(paused=False, nt=None, nt_seen=0.0, last_request=None)
+    server.STATE.update(paused=False, mode="llm", nt=None, nt_seen=0.0, last_request=None)
     for q in (server.DECISIONS, server.EVENTS, server.COMMANDS, server.PENDING):
         q.clear()
     return TestClient(server.app)
@@ -50,7 +50,8 @@ def test_buy_decision(client, monkeypatch):
     fake_llm(monkeypatch, json.dumps({"action": "buy", "confidence": 0.8, "reason": "tendencia"}))
     r = client.post("/decide", json=payload())
     assert r.status_code == 200
-    assert r.json() == {"action": "BUY", "confidence": 0.8, "reason": "tendencia"}
+    d = r.json()
+    assert (d["action"], d["confidence"], d["reason"], d["stop_ticks"]) == ("BUY", 0.8, "tendencia", None)
 
 
 def test_invalid_json_is_hold(client, monkeypatch):
@@ -262,3 +263,101 @@ def test_backtest_api(client, tmp_path, monkeypatch):
     assert st["error"] is None and st["result"]["meta"]["strategy"] == "ema"
     assert st["history"][0]["strategy"] == "ema"
     assert client.post("/api/backtest/start", json={"file": "../etc/passwd", "strategy": "ema"}, headers=PANEL).status_code == 404
+
+
+# ---------------- Playbook (setups + filtro IA) ----------------
+import pandas as pd  # noqa: E402
+import playbook  # noqa: E402
+from setups import SetupDetector  # noqa: E402
+
+REAL = Path("/root/.claude/uploads/73efb235-348d-5052-a660-2c0635a93e7d/2171763f-MNQ_09-26.Last.txt")
+
+
+def ctx_frame(tmp_path):
+    src = REAL if REAL.exists() else write_export(tmp_path / "x.txt", 12)
+    return playbook.add_context(bt.resample(bt.load_nt_export(src)))
+
+
+def test_context_levels(tmp_path):
+    df = ctx_frame(tmp_path)
+    rth = df[df["rth"]]
+    day = sorted(rth["trade_date"].unique())[-3]
+    prev = sorted(rth["trade_date"].unique())[-4]
+    row = rth[rth["trade_date"] == day].iloc[-1]
+    assert row["pdh"] == rth[rth["trade_date"] == prev]["high"].max()
+    assert row["pdl"] == rth[rth["trade_date"] == prev]["low"].min()
+    assert rth[rth["trade_date"] == day]["orh"].dropna().nunique() == 1
+
+
+def test_detector_fires_once_per_day(tmp_path):
+    df = ctx_frame(tmp_path)
+    det, seen = SetupDetector(), {}
+    for i in range(1, len(df)):
+        for c in det.detect(df.iloc[i], df.iloc[i - 1]):
+            assert c["stop_pts"] > 0 and abs(c["target_pts"] - 2 * c["stop_pts"]) < 0.02
+            if c["setup"] == "ORB":
+                key = (df.iloc[i]["trade_date"], c["side"])
+                assert key not in seen
+                seen[key] = True
+
+
+def test_filter_prompt_has_trader_context(tmp_path):
+    df = ctx_frame(tmp_path)
+    row = df[df["rth"] & df["orh"].notna()].iloc[-1]
+    cand = {"setup": "SWEEP", "side": "SHORT", "stop_pts": 20.0, "target_pts": 40.0, "why": "prueba"}
+    p = playbook.build_filter_prompt(row, cand, {"trades_today": 1, "daily_pnl": -40})
+    for word in ("VWAP", "Día anterior", "Rango de apertura", "Stop a 20.0 pts", "PnL del día: -40.00"):
+        assert word in p
+
+
+def test_verdict_parsing():
+    assert playbook.parse_verdict('{"take": "true", "confidence": 3, "reason": "ok"}') == {"take": True, "confidence": 1.0, "reason": "ok"}
+    assert playbook.parse_verdict("nada")["take"] is False
+
+
+def test_live_setups_mode_sends_structural_stop(client, monkeypatch, tmp_path):
+    """Busca una vela real con setup y comprueba que /decide devuelve stop/target en ticks."""
+    df = ctx_frame(tmp_path)
+    det = SetupDetector()
+    hit = None
+    for i in range(400, len(df)):
+        t = df.index[i]
+        if not (93500 <= t.hour * 10000 + t.minute * 100 <= 154500):
+            continue
+        if det.detect(df.iloc[i], df.iloc[i - 1]):
+            hit = i
+            break
+    assert hit is not None
+    window = df.iloc[hit - 399:hit + 1]
+    bars = [{"t": f"{t:%Y-%m-%dT%H:%M:%S}", "o": r.open, "h": r.high, "l": r.low, "c": r.close, "v": r.volume}
+            for t, r in window.iterrows()]
+    body = {"instrument": "MNQ", "tick_size": 0.25, "point_value": 2.0, "bars": bars}
+    server.STATE["mode"] = "setups"
+    d = client.post("/decide", json=body).json()
+    assert d["action"] in ("BUY", "SELL") and d["stop_ticks"] > 0 and d["target_ticks"] >= d["stop_ticks"]
+
+    # con filtro IA: si la IA dice saltar -> HOLD; si falla -> HOLD (nunca opera a ciegas)
+    server.STATE["mode"] = "setups_ia"
+    monkeypatch.setattr(playbook, "ask_llm", lambda s, u: '{"take": false, "confidence": 0.9, "reason": "contra tendencia"}')
+    assert client.post("/decide", json=body).json()["action"] == "HOLD"
+    monkeypatch.setattr(playbook, "ask_llm", lambda s, u: '{"take": true, "confidence": 0.8, "reason": "a favor"}')
+    assert client.post("/decide", json=body).json()["action"] == d["action"]
+    def boom(s, u): raise requests.ConnectionError("down")
+    monkeypatch.setattr(playbook, "ask_llm", boom)
+    assert client.post("/decide", json=body).json()["action"] == "HOLD"
+
+
+def test_setups_mode_needs_enough_bars(client):
+    server.STATE["mode"] = "setups"
+    d = client.post("/decide", json=payload()).json()
+    assert d["action"] == "HOLD" and "Velas a enviar" in d["reason"]
+
+
+def test_merge_contracts_back_adjusts():
+    idx_old = pd.date_range("2026-06-08 09:31", periods=3000, freq="1min")
+    idx_new = idx_old[1000:]
+    old = pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000.0}, index=idx_old)
+    new = pd.DataFrame({"open": 110.0, "high": 111.0, "low": 109.0, "close": 110.0, "volume": 5000.0}, index=idx_new)
+    m = bt.merge_contracts([new, old])
+    assert m["close"].nunique() == 1 and m["close"].iloc[0] == 110.0   # serie continua sin salto
+    assert m.attrs["rolls"][0]["offset"] == 10.0

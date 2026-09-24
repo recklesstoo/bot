@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 import backtest as bt
+import playbook
 from indicators import add_indicators
 
 load_dotenv()
@@ -77,6 +78,8 @@ class DecideRequest(BaseModel):
     daily_pnl: float = 0.0
     trades_today: int = 0
     allow_shorts: bool = True
+    start_time: int = 93500         # horario de la estrategia (HHmmss, hora de NY)
+    end_time: int = 154500
     bars: List[Bar]
 
 
@@ -84,6 +87,9 @@ class Decision(BaseModel):
     action: str
     confidence: float
     reason: str
+    setup: Optional[str] = None
+    stop_ticks: Optional[int] = None      # stop estructural del setup (NinjaTrader lo usa en vez del ATR)
+    target_ticks: Optional[int] = None
 
 
 SYSTEM_PROMPT = """You are a disciplined intraday futures trader.
@@ -192,7 +198,8 @@ def parse_decision(raw: str, req: DecideRequest) -> Decision:
 # Estado en memoria para el panel (se pierde al reiniciar, salvo el log)
 # =====================================================================
 _lock = threading.Lock()
-STATE = {"paused": False, "nt": None, "nt_seen": 0.0, "last_request": None,
+MODES = {"setups": "Setups (ORB + barrido)", "setups_ia": "Setups + filtro IA", "llm": "IA libre (sin setups)"}
+STATE = {"paused": False, "mode": os.getenv("DECISION_MODE", "setups"), "nt": None, "nt_seen": 0.0, "last_request": None,
          "ollama": {"ok": None, "models": [], "error": None, "checked": 0.0}}
 DECISIONS: deque = deque(maxlen=200)
 EVENTS: deque = deque(maxlen=300)
@@ -235,6 +242,7 @@ def write_log(req: DecideRequest, decision: Decision, latency_ms: Optional[int] 
         "position": req.position,
         "daily_pnl": req.daily_pnl,
         "latency_ms": latency_ms,
+        "mode": STATE["mode"],
         **decision.model_dump(),
     }
     with _lock:
@@ -246,10 +254,30 @@ def write_log(req: DecideRequest, decision: Decision, latency_ms: Optional[int] 
         log.warning("No se pudo escribir el log: %s", e)
 
 
-def run_decision(req: DecideRequest):
-    """Pipeline completo: indicadores -> prompt -> Ollama -> validación."""
+PLAYBOOK_MIN_BARS = 300   # contexto: día anterior + noche + rango de apertura (~25 h de velas de 5 min)
+
+
+def run_playbook(req: DecideRequest, use_llm: bool) -> Decision:
+    if len(req.bars) < PLAYBOOK_MIN_BARS:
+        return hold(f"Pocas velas para el contexto ({len(req.bars)} < {PLAYBOOK_MIN_BARS}): sube 'Velas a enviar' en NinjaTrader")
+    d = playbook.live_decision(playbook.frame_from_bars(req.bars), req.position.upper(), req.tick_size,
+                               req.point_value, req.start_time, req.end_time, req.trades_today,
+                               req.daily_pnl, use_llm)
+    return Decision(**{k: d.get(k) for k in Decision.model_fields})
+
+
+def run_decision(req: DecideRequest, mode: Optional[str] = None):
+    """Pipeline completo según el modo. Devuelve (decisión, latencia_ms, respuesta_cruda)."""
     t0 = time.monotonic()
     raw = None
+    mode = mode or "llm"
+    if mode in ("setups", "setups_ia"):
+        try:
+            decision = run_playbook(req, mode == "setups_ia")
+        except Exception as e:
+            log.exception("Error en el playbook")
+            decision = hold(f"Error en el playbook: {e}")
+        return decision, int((time.monotonic() - t0) * 1000), None
     if len(req.bars) < MIN_BARS:
         decision = hold(f"Pocas velas ({len(req.bars)} < {MIN_BARS})")
     else:
@@ -320,7 +348,7 @@ def decide(req: DecideRequest, x_api_token: Optional[str] = Header(default=None)
     if STATE["paused"]:
         decision = hold("IA en pausa desde el panel")
     else:
-        decision, latency, _ = run_decision(req)
+        decision, latency, _ = run_decision(req, STATE["mode"])
 
     log.info("%s %s pos=%s -> %s (%.2f) %s", req.instrument, req.bars[-1].t if req.bars else "-",
              req.position, decision.action, decision.confidence, decision.reason)
@@ -399,6 +427,7 @@ def api_state():
         return {
             "server_time": now_iso(),
             "paused": STATE["paused"],
+            "mode": STATE["mode"], "modes": MODES,
             "model": MODEL,
             "ollama": {"ok": info["ok"], "error": info["error"]},
             "nt": {"connected": nt_connected(),
@@ -432,6 +461,19 @@ def api_command(body: CommandIn):
     return cmd
 
 
+class ModeIn(BaseModel):
+    mode: str
+
+
+@app.post("/api/mode", dependencies=[Depends(require_panel)])
+def api_mode(body: ModeIn):
+    if body.mode not in MODES:
+        raise HTTPException(status_code=400, detail="Modo desconocido")
+    STATE["mode"] = body.mode
+    add_event("Panel", f"Modo de decisión en vivo: {MODES[body.mode]}")
+    return {"mode": body.mode}
+
+
 class PauseIn(BaseModel):
     paused: bool
 
@@ -458,7 +500,9 @@ def demo_request() -> DecideRequest:
 def api_test_ai():
     req = STATE["last_request"]
     source = "últimas velas reales de NinjaTrader" if req else "velas de ejemplo (NinjaTrader aún no envió datos)"
-    decision, latency, raw = run_decision(req or demo_request())
+    if not req and STATE["mode"] != "llm":
+        raise HTTPException(status_code=409, detail="En modo setups la prueba necesita velas reales: activa la estrategia en NinjaTrader primero")
+    decision, latency, raw = run_decision(req or demo_request(), STATE["mode"])
     add_event("Prueba IA", f"{decision.action} conf={decision.confidence:.2f} en {latency} ms — {decision.reason}")
     return {"source": source, "latency_ms": latency, "raw": raw, **decision.model_dump()}
 
@@ -498,7 +542,8 @@ BT_HISTORY_FILE = DATA_DIR / "bt_history.json"
 BT = {"running": False, "done": 0, "total": 0, "result": None, "error": None,
       "params": None, "started": None, "finished": None}
 _bt_cancel = threading.Event()
-STRATEGY_NAMES = {"qwen": "IA (Ollama)", "ema": "Cruce EMA (referencia)", "random": "Azar (referencia)"}
+STRATEGY_NAMES = {"setups": "Setups (ORB + barrido)", "setups_ia": "Setups + filtro IA", "qwen": "IA libre (Ollama)",
+                  "ema": "Cruce EMA (referencia)", "random": "Azar (referencia)"}
 
 
 def _bt_history() -> list:
@@ -558,19 +603,32 @@ def _downsample(points: list, n: int = 600) -> list:
     return [points[int(i * step)] for i in range(n)] + [points[-1]]
 
 
-def _bt_worker(path: Path, body: BacktestIn):
+ALL_FILES = "*"   # une todos los archivos subidos (varios contratos) en una serie continua
+
+
+def _load_data(body: BacktestIn):
+    if body.file == ALL_FILES:
+        files = [f for f in DATA_DIR.iterdir() if f.suffix.lower() in (".txt", ".csv")]
+        df = bt.merge_contracts([bt.load_nt_export(f, body.tz) for f in files])
+        return df, f"{len(files)} archivos unidos"
+    return bt.load_nt_export(_safe_data_path(body.file), body.tz), body.file
+
+
+def _bt_worker(body: BacktestIn):
     t0 = time.time()
 
     def progress(done, total):
         BT.update(done=done, total=total)
     try:
-        df1 = bt.slice_days(bt.load_nt_export(path, body.tz), body.days or None)
+        df_all, label = _load_data(body)
+        rolls = df_all.attrs.get("rolls", [])
+        df1 = bt.slice_days(df_all, body.days or None)
         strategy = bt.build_strategy(body.strategy, DATA_DIR)
         params = bt.Params(min_confidence=body.min_confidence)
         res = bt.Backtester(df1, params, strategy, progress, _bt_cancel).run()
         res["equity"] = _downsample(res["equity"])
         res["trades"] = res["trades"][-300:]
-        res["meta"] = {"file": path.name, "strategy": body.strategy, "strategy_name": STRATEGY_NAMES.get(body.strategy, body.strategy),
+        res["meta"] = {"file": label, "rolls": rolls, "strategy": body.strategy, "strategy_name": STRATEGY_NAMES.get(body.strategy, body.strategy),
                        "model": MODEL if body.strategy == "qwen" else None, "days": body.days,
                        "min_confidence": body.min_confidence, "seconds": round(time.time() - t0)}
         BT["result"] = res
@@ -597,15 +655,16 @@ def bt_start(body: BacktestIn):
         raise HTTPException(status_code=409, detail="Ya hay un backtest en marcha")
     if body.strategy not in STRATEGY_NAMES:
         raise HTTPException(status_code=400, detail="Estrategia desconocida")
-    path = _safe_data_path(body.file)
-    if body.strategy == "qwen" and not check_ollama(max_age=0)["ok"]:
+    if body.file != ALL_FILES:
+        _safe_data_path(body.file)
+    if body.strategy in ("qwen", "setups_ia") and not check_ollama(max_age=0)["ok"]:
         raise HTTPException(status_code=409, detail="Ollama no está disponible: arráncalo antes de probar la IA")
     _bt_cancel.clear()
     BT.update(running=True, done=0, total=0, result=None, error=None, started=now_iso(), finished=None,
               started_ts=time.time(), params=body.model_dump())
-    add_event("Backtest", f"Iniciado: {STRATEGY_NAMES[body.strategy]} con {path.name}"
+    add_event("Backtest", f"Iniciado: {STRATEGY_NAMES[body.strategy]} con {'todos los archivos' if body.file == ALL_FILES else body.file}"
                           + (f" (últimos {body.days} días)" if body.days else ""))
-    threading.Thread(target=_bt_worker, args=(path, body), daemon=True).start()
+    threading.Thread(target=_bt_worker, args=(body,), daemon=True).start()
     return {"started": True}
 
 

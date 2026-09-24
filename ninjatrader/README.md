@@ -86,13 +86,37 @@ Con el servidor encendido, abre **http://127.0.0.1:8000** en el navegador:
 
 NinjaTrader se conecta al panel con un latido cada segundo cuando la estrategia está activa en tiempo real. Si un comando del panel no llega a NinjaTrader en 15 s, caduca y nunca se ejecuta tarde. Puedes desactivar las órdenes manuales con el parámetro **Permitir órdenes desde el panel**.
 
+## Motor de decisión: playbook de setups + filtro de IA
+
+En lugar de pedirle a la IA "¿compro o vendo?" en cada vela, el bot funciona como un trader con un **playbook**:
+
+1. **Contexto** (`ai_server/context.py`): máximo, mínimo y cierre del día anterior, máximo y mínimo de la noche, rango de apertura (9:30–9:45), VWAP, tendencia de fondo, volatilidad y volumen relativos, y hora del día.
+2. **Setups** (`ai_server/setups.py`), cada uno con un **stop estructural** (donde la idea deja de ser válida) y objetivo de 2R:
+   - **ORB:** cierre fuera del rango de apertura, hasta las 11:30.
+   - **SWEEP:** barrido fallido del máximo o mínimo del día anterior o de la noche.
+   - *VWAP (retroceso): desactivado porque fue negativo en el periodo de diseño.*
+3. **Filtro de IA** (opcional, `ai_server/playbook.py`): Qwen recibe el setup y el contexto en lenguaje de trader, y decide **tomar o saltar**. No puede cambiar el stop ni el objetivo.
+
+El modo en vivo se elige en el panel (**Modo de decisión en vivo**):
+
+| Modo | Qué hace |
+|---|---|
+| Setups (ORB + barrido) | Solo reglas. Es el modo validado en el backtest |
+| Setups + filtro IA | Reglas, y Qwen decide si se toma cada setup |
+| IA libre | El modo original: Qwen decide en cada vela con indicadores |
+
+NinjaTrader recibe el stop y el objetivo del setup en ticks. Si el stop es menor que el mínimo, se amplía y el objetivo se escala. Si es mayor que el **Stop máximo**, **no opera**. El límite de pérdida diaria sigue aplicándose.
+
+**Requisito en NinjaTrader:** la estrategia envía **1500 velas** (unos 5 días de 5 minutos). En el gráfico, pon **Days to load: 10** o más. Si no, el bot responde HOLD y te avisa en el registro.
+
 ## Backtest con datos históricos
 
 En el panel, la sección **Backtest** prueba el bot sobre datos pasados con **las mismas reglas que en vivo**: horario, stop y target por ATR, pérdida diaria, máximo de trades y confianza mínima. Incluye comisiones (0.62 $ por lado) y 1 tick de deslizamiento.
 
 1. En NinjaTrader: **Tools → Historical Data → Export**, instrumento MNQ, velas de **1 minuto**. Así el backtest puede saber si se tocó antes el stop o el target.
 2. En el panel: **📂 Subir archivo .txt**, elige la estrategia y pulsa **▶ Ejecutar backtest**.
-3. Compara en la tabla **Comparativa**:
+   Si subes varios contratos (por ejemplo 06-26 y 09-26), elige **Todos los archivos (contratos unidos)**: se unen en una serie continua, cambiando de contrato el día en que el nuevo tiene más volumen y ajustando la diferencia de precio.
+3. Compara en la tabla **Comparativa** y mira sobre todo el tramo de **Validación** (días que no se usaron para ajustar nada):
    - **IA (Ollama):** tu modelo, con el mismo prompt que en vivo. Tarda 1–2 s por vela; las respuestas se guardan en caché, así que repetirlo es instantáneo.
    - **Cruce EMA** y **Azar:** referencias. Si la IA no supera al azar después de comisiones, no tiene ventaja.
 
