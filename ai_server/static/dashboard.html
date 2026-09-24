@@ -65,6 +65,23 @@
   .empty { color: var(--muted); padding: 10px 0; }
   .banner { grid-column: span 12; padding: 10px 14px; border-radius: 8px; background: #4a1c1c; border: 1px solid #7d2b2a; display: none; }
   .banner.show { display: block; }
+  /* ---- Backtest ---- */
+  :root { --gain: #3d8ef0; --loss: #e5484d; --grid: #232b36; }
+  .bt-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; align-items: end; }
+  .bt-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  select { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .progress { height: 10px; background: var(--panel2); border-radius: 99px; overflow: hidden; margin: 14px 0 6px; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .chart { position: relative; width: 100%; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart .axis { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .tip { position: absolute; pointer-events: none; background: #0b0e13; border: 1px solid var(--line); border-radius: 6px;
+         padding: 6px 9px; font-size: 12px; white-space: nowrap; display: none; z-index: 3; transform: translate(-50%, -110%); }
+  .tip b { font-variant-numeric: tabular-nums; }
+  .bt-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; margin-top: 14px; }
+  @media (max-width: 1000px) { .bt-grid { grid-template-columns: 1fr; } }
+  .muted { color: var(--muted); }
+  #bt-stats .v { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
 <body>
@@ -126,6 +143,58 @@
   <section class="card span5">
     <h2>Registro de actividad</h2>
     <div class="log" id="events"></div>
+  </section>
+
+  <section class="card span12" id="bt-card">
+    <h2>Backtest con datos históricos</h2>
+    <div class="bt-form">
+      <label>Datos (export de NinjaTrader)
+        <select id="bt-file"><option value="">— sube un archivo —</option></select>
+      </label>
+      <label>&nbsp;<button id="bt-upload-btn" type="button">📂 Subir archivo .txt</button></label>
+      <input type="file" id="bt-upload" accept=".txt,.csv" hidden>
+      <label>Estrategia
+        <select id="bt-strategy">
+          <option value="qwen">IA (Ollama)</option>
+          <option value="ema">Cruce EMA (referencia)</option>
+          <option value="random">Azar (referencia)</option>
+        </select>
+      </label>
+      <label>Periodo
+        <select id="bt-days">
+          <option value="0">Todos los datos</option>
+          <option value="5">Últimos 5 días</option>
+          <option value="10">Últimos 10 días</option>
+          <option value="20">Últimos 20 días</option>
+        </select>
+      </label>
+      <label>Confianza mínima
+        <input id="bt-conf" type="number" min="0" max="1" step="0.05" value="0.65">
+      </label>
+      <label>&nbsp;<button class="b-blue" id="bt-start" type="button">▶ Ejecutar backtest</button></label>
+      <label>&nbsp;<button id="bt-stop" type="button" disabled>■ Detener</button></label>
+    </div>
+    <div class="progress"><div id="bt-bar"></div></div>
+    <div class="muted" id="bt-status">Sube el export de NinjaTrader (Tools → Historical Data → Export) y elige una estrategia. Con la IA, cada vela tarda 1–2 s: no lo ejecutes con el bot operando en vivo.</div>
+
+    <div id="bt-results" hidden>
+      <div class="stats" style="margin-top:14px" id="bt-stats"></div>
+      <div class="bt-grid">
+        <div><div class="sub">Curva de capital (PnL acumulado por operación cerrada)</div><div class="chart" id="bt-equity"></div></div>
+        <div><div class="sub">PnL por día</div><div class="chart" id="bt-daily"></div></div>
+      </div>
+      <div class="sub">Operaciones (últimas 100)</div>
+      <div class="table-wrap" style="max-height:300px">
+        <table><thead><tr><th>Entrada</th><th>Lado</th><th>Precio</th><th>Salida</th><th>Motivo</th><th>PnL</th><th>Razón</th></tr></thead>
+        <tbody id="bt-trades"></tbody></table>
+      </div>
+    </div>
+
+    <div class="sub">Comparativa de ejecuciones</div>
+    <div class="table-wrap" style="max-height:260px">
+      <table><thead><tr><th>Fecha</th><th>Estrategia</th><th>Periodo</th><th>Trades</th><th>PnL neto</th><th>Aciertos</th><th>Factor benef.</th><th>Máx. caída</th><th>Días +/−</th></tr></thead>
+      <tbody id="bt-history"></tbody></table>
+    </div>
   </section>
 
   <section class="card span12">
@@ -269,6 +338,168 @@ $("chat-form").onsubmit = async ev => {
   catch (e) { pending.textContent = "❌ " + e.message; }
   $("chat-send").disabled = false; chat.scrollTop = chat.scrollHeight;
 };
+
+// ===================== Backtest =====================
+const fmtMoney = v => (v < 0 ? "−$" : "$") + Math.abs(v).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const svgNS = "http://www.w3.org/2000/svg";
+function niceTicks(min, max, n = 4) {
+  if (min === max) { min -= 1; max += 1; }
+  const raw = (max - min) / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+  const out = []; let v = Math.floor(min / step) * step;
+  out.push(v); while (v < max - 1e-9) { v += step; out.push(v); }
+  return out;
+}
+function tipAt(box, html, x, y) { let t = box.querySelector(".tip"); if (!t) { t = document.createElement("div"); t.className = "tip"; box.appendChild(t); }
+  t.innerHTML = html; t.style.left = x + "px"; t.style.top = y + "px"; t.style.display = "block"; }
+function hideTip(box) { const t = box.querySelector(".tip"); if (t) t.style.display = "none"; }
+
+function equityChart(box, points) {
+  box.innerHTML = "";
+  if (!points.length) { box.innerHTML = '<div class="empty">Sin operaciones.</div>'; return; }
+  const data = [["inicio", 0], ...points], W = 640, H = 260, m = {l: 58, r: 12, t: 12, b: 26};
+  const ys = data.map(d => d[1]), ticks = niceTicks(Math.min(0, ...ys), Math.max(0, ...ys));
+  const y0 = ticks[0], y1 = ticks[ticks.length - 1];
+  const X = i => m.l + i / (data.length - 1 || 1) * (W - m.l - m.r), Y = v => m.t + (1 - (v - y0) / (y1 - y0)) * (H - m.t - m.b);
+  const svg = document.createElementNS(svgNS, "svg"); svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `Curva de capital: final ${fmtMoney(ys[ys.length - 1])}`);
+  let g = "";
+  ticks.forEach(v => { g += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="${v === 0 ? "#3a4452" : "var(--grid)"}" stroke-width="1"/>`
+                          + `<text class="axis" x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${fmtMoney(v).replace(".00", "")}</text>`; });
+  [0, Math.floor((data.length - 1) / 2), data.length - 1].forEach((i, k) => { if (i > 0 || k === 0) {
+    const lbl = i === 0 ? "inicio" : String(data[i][0]).slice(5, 10);
+    g += `<text class="axis" x="${X(i)}" y="${H - 6}" text-anchor="${k === 0 ? "start" : k === 2 ? "end" : "middle"}">${lbl}</text>`; } });
+  const path = data.map((d, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(d[1]).toFixed(1)}`).join("");
+  g += `<path d="${path}" fill="none" stroke="var(--gain)" stroke-width="2" stroke-linejoin="round"/>`;
+  const last = data.length - 1;
+  g += `<text x="${X(last) - 4}" y="${Y(ys[last]) - 8}" text-anchor="end" fill="var(--text)" font-size="12" font-weight="600">${fmtMoney(ys[last])}</text>`;
+  g += `<line id="eq-x" y1="${m.t}" y2="${H - m.b}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3" visibility="hidden"/>`
+     + `<circle id="eq-dot" r="4.5" fill="var(--gain)" stroke="var(--panel)" stroke-width="2" visibility="hidden"/>`
+     + `<rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent" id="eq-hit"/>`;
+  svg.innerHTML = g; box.appendChild(svg);
+  const hit = svg.querySelector("#eq-hit"), xl = svg.querySelector("#eq-x"), dot = svg.querySelector("#eq-dot");
+  hit.addEventListener("mousemove", ev => {
+    const r = svg.getBoundingClientRect(), sx = (ev.clientX - r.left) / r.width * W;
+    const i = Math.max(0, Math.min(last, Math.round((sx - m.l) / (W - m.l - m.r) * last)));
+    xl.setAttribute("x1", X(i)); xl.setAttribute("x2", X(i)); xl.setAttribute("visibility", "visible");
+    dot.setAttribute("cx", X(i)); dot.setAttribute("cy", Y(data[i][1])); dot.setAttribute("visibility", "visible");
+    const k = r.width / W;
+    tipAt(box, `${i === 0 ? "Inicio" : esc(String(data[i][0]).slice(0, 16))}<br>Acumulado: <b>${fmtMoney(data[i][1])}</b>` +
+      (i > 0 ? `<br>Operación: <b>${fmtMoney(data[i][1] - data[i - 1][1])}</b>` : ""), X(i) * k, Y(data[i][1]) * k - 6);
+  });
+  hit.addEventListener("mouseleave", () => { xl.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); hideTip(box); });
+}
+
+function dailyChart(box, daily) {
+  box.innerHTML = "";
+  const days = Object.entries(daily).sort();
+  if (!days.length) { box.innerHTML = '<div class="empty">Sin operaciones.</div>'; return; }
+  const W = 420, H = 260, m = {l: 52, r: 8, t: 12, b: 26}, vals = days.map(d => d[1]);
+  const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals)), y0 = ticks[0], y1 = ticks[ticks.length - 1];
+  const Y = v => m.t + (1 - (v - y0) / (y1 - y0)) * (H - m.t - m.b), slot = (W - m.l - m.r) / days.length;
+  const bw = Math.max(2, slot - 2), rad = Math.min(4, bw / 2);
+  let g = "";
+  ticks.forEach(v => { g += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="${v === 0 ? "#3a4452" : "var(--grid)"}"/>`
+                          + `<text class="axis" x="${m.l - 6}" y="${Y(v) + 4}" text-anchor="end">${fmtMoney(v).replace(".00", "")}</text>`; });
+  days.forEach(([d, v], i) => {
+    const x = m.l + i * slot + 1, top = Y(Math.max(v, 0)), bot = Y(Math.min(v, 0)), h = Math.max(1, bot - top), r = Math.min(rad, h);
+    // extremo redondeado en el lado del dato, recto en la línea de cero
+    const p = v >= 0
+      ? `M${x},${bot}V${top + r}Q${x},${top} ${x + r},${top}H${x + bw - r}Q${x + bw},${top} ${x + bw},${top + r}V${bot}Z`
+      : `M${x},${top}V${bot - r}Q${x},${bot} ${x + r},${bot}H${x + bw - r}Q${x + bw},${bot} ${x + bw},${bot - r}V${top}Z`;
+    g += `<path d="${p}" fill="${v >= 0 ? "var(--gain)" : "var(--loss)"}" data-i="${i}"/>`
+       + `<rect x="${m.l + i * slot}" y="${m.t}" width="${slot}" height="${H - m.t - m.b}" fill="transparent" data-i="${i}" class="hit"/>`;
+  });
+  g += `<text class="axis" x="${m.l}" y="${H - 6}">${days[0][0].slice(5)}</text><text class="axis" x="${W - m.r}" y="${H - 6}" text-anchor="end">${days[days.length - 1][0].slice(5)}</text>`;
+  const svg = document.createElementNS(svgNS, "svg"); svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `PnL diario: ${vals.filter(v => v > 0).length} días positivos, ${vals.filter(v => v <= 0).length} negativos`);
+  svg.innerHTML = g; box.appendChild(svg);
+  svg.querySelectorAll(".hit").forEach(h => {
+    h.addEventListener("mousemove", () => { const i = +h.dataset.i, [d, v] = days[i], r = svg.getBoundingClientRect(), k = r.width / W;
+      svg.querySelectorAll("path[data-i]").forEach(p => p.style.opacity = p.dataset.i == i ? 1 : .45);
+      tipAt(box, `${esc(d)}<br><b>${v >= 0 ? "+" : ""}${fmtMoney(v)}</b>`, (m.l + (i + .5) * slot) * k, Y(Math.max(v, 0)) * k - 6); });
+    h.addEventListener("mouseleave", () => { svg.querySelectorAll("path[data-i]").forEach(p => p.style.opacity = 1); hideTip(box); });
+  });
+}
+
+function renderBtResult(res) {
+  const s = res.stats, meta = res.meta || {};
+  $("bt-results").hidden = false;
+  const tile = (k, v, cls = "") => `<div class="stat"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`;
+  $("bt-stats").innerHTML =
+    tile("Estrategia", esc((meta.strategy_name || "").replace(" (referencia)", ""))) +
+    tile("PnL neto", fmtMoney(s.net_pnl), s.net_pnl >= 0 ? "pos" : "neg") +
+    tile("Operaciones", `${s.trades} <span class="k">(${s.long_trades}L / ${s.short_trades}C)</span>`) +
+    tile("Aciertos", (s.win_rate * 100).toFixed(1) + "%") +
+    tile("Factor de beneficio", s.profit_factor == null ? "—" : s.profit_factor) +
+    tile("Esperanza / trade", fmtMoney(s.expectancy), s.expectancy >= 0 ? "pos" : "neg") +
+    tile("Máx. caída", fmtMoney(s.max_drawdown), "neg") +
+    tile("Días + / −", `${s.green_days} / ${s.red_days}`) +
+    tile("Stops / Targets", `${s.stops} / ${s.targets}`) +
+    tile("Bloqueos riesgo", s.blocked.riesgo_diario + s.blocked.max_trades) +
+    tile("Bloqueos confianza", s.blocked.confianza) +
+    tile("Comisiones", fmtMoney(s.commissions));
+  equityChart($("bt-equity"), res.equity);
+  dailyChart($("bt-daily"), res.daily);
+  $("bt-trades").innerHTML = res.trades.slice(-100).reverse().map(t => `<tr>
+    <td class="num">${esc(t.entry_time.slice(0, 16))}</td><td class="${t.side === "LONG" ? "pos" : "neg"}">${t.side === "LONG" ? "Largo" : "Corto"}</td>
+    <td class="num">${t.entry_price.toFixed(2)}</td><td class="num">${esc(t.exit_time.slice(11, 16))} @ ${t.exit_price.toFixed(2)}</td>
+    <td>${esc(t.exit_reason)}</td><td class="num ${t.pnl >= 0 ? "pos" : "neg"}">${fmtMoney(t.pnl)}</td><td>${esc(t.reason)}</td></tr>`).join("")
+    || `<tr><td colspan="7" class="empty">Sin operaciones.</td></tr>`;
+}
+
+let btLastFinished = null;
+async function btRefresh() {
+  let st; try { st = await fetch("/api/backtest/status").then(r => r.json()); } catch { return; }
+  $("bt-start").disabled = st.running; $("bt-stop").disabled = !st.running;
+  const pct = st.total ? Math.round(st.done / st.total * 100) : (st.running ? 0 : (st.result ? 100 : 0));
+  $("bt-bar").style.width = pct + "%";
+  if (st.running) {
+    const eta = st.eta_sec != null ? ` · faltan ~${st.eta_sec >= 60 ? Math.round(st.eta_sec / 60) + " min" : st.eta_sec + " s"}` : "";
+    $("bt-status").textContent = `Ejecutando… ${st.done} / ${st.total || "?"} velas (${pct}%)${eta}`;
+  } else if (st.error) {
+    $("bt-status").textContent = "❌ " + st.error;
+  } else if (st.result) {
+    const mt = st.result.meta || {};
+    $("bt-status").textContent = `${st.result.cancelled ? "Detenido" : "Terminado"} · ${mt.strategy_name} · ${mt.file} · ${st.result.stats.period[0].slice(0, 10)} → ${st.result.stats.period[1].slice(0, 10)} · ${mt.seconds} s`;
+    if (btLastFinished !== st.finished) { btLastFinished = st.finished; renderBtResult(st.result); }
+  }
+  $("bt-history").innerHTML = st.history.length ? st.history.map(h => `<tr>
+    <td class="num">${hhmm(h.ts)}</td><td>${esc(h.strategy_name)}${h.model ? ` <span class="muted">(${esc(h.model)})</span>` : ""}</td>
+    <td>${h.days ? "Últimos " + h.days + " d" : "Todo"}</td><td class="num">${h.trades}</td>
+    <td class="num ${h.net_pnl >= 0 ? "pos" : "neg"}">${fmtMoney(h.net_pnl)}</td><td class="num">${(h.win_rate * 100).toFixed(1)}%</td>
+    <td class="num">${h.profit_factor ?? "—"}</td><td class="num neg">${fmtMoney(h.max_drawdown)}</td><td class="num">${h.green_days} / ${h.red_days}</td></tr>`).join("")
+    : `<tr><td colspan="9" class="empty">Aún no hay ejecuciones. Prueba la IA y las dos referencias con los mismos datos para comparar.</td></tr>`;
+}
+
+async function btFiles(select) {
+  const files = await fetch("/api/backtest/files").then(r => r.json()).catch(() => []);
+  const sel = $("bt-file"), cur = select || sel.value;
+  sel.innerHTML = files.length ? files.map(f => `<option value="${esc(f.name)}">${esc(f.name)} (${f.size_mb} MB)</option>`).join("")
+                               : '<option value="">— sube un archivo —</option>';
+  if (cur && files.some(f => f.name === cur)) sel.value = cur;
+}
+
+$("bt-upload-btn").onclick = () => $("bt-upload").click();
+$("bt-upload").onchange = async ev => {
+  const f = ev.target.files[0]; if (!f) return;
+  $("bt-status").textContent = `Subiendo ${f.name}…`;
+  try {
+    const r = await fetch("/api/backtest/upload?name=" + encodeURIComponent(f.name), { method: "POST", headers: { "X-Panel": "1" }, body: f });
+    const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.status);
+    $("bt-status").textContent = `✅ ${d.name}: ${d.rows.toLocaleString()} velas de ${d.start.slice(0, 10)} a ${d.end.slice(0, 10)}`;
+    await btFiles(d.name);
+  } catch (e) { $("bt-status").textContent = "❌ " + e.message; }
+  ev.target.value = "";
+};
+$("bt-start").onclick = async () => {
+  const file = $("bt-file").value; if (!file) { $("bt-status").textContent = "Primero sube un archivo de datos."; return; }
+  try { await post("/api/backtest/start", { file, strategy: $("bt-strategy").value, days: +$("bt-days").value, min_confidence: +$("bt-conf").value }); btRefresh(); }
+  catch (e) { $("bt-status").textContent = "❌ " + e.message; }
+};
+$("bt-stop").onclick = () => post("/api/backtest/stop").catch(() => {});
+
+btFiles(); btRefresh(); setInterval(btRefresh, 2000);
 
 refresh();
 setInterval(refresh, 2000);

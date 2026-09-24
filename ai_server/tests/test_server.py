@@ -1,4 +1,5 @@
 import json
+import time
 import math
 import sys
 from pathlib import Path
@@ -194,3 +195,70 @@ def test_chat(client, monkeypatch):
     monkeypatch.setattr(server.requests, "post", lambda *a, **k: Resp())
     r = client.post("/api/chat", json={"message": "hola"}, headers=PANEL)
     assert r.status_code == 200 and r.json()["reply"] == "Hola, todo bien"
+
+
+# ---------------- Backtest ----------------
+import backtest as bt  # noqa: E402
+
+
+def write_export(path, days=3):
+    """Export sintético estilo NinjaTrader (UTC, velas de 1 min, sesión 22:01–21:00)."""
+    import pandas as pd
+    lines, price = [], 20000.0
+    start = pd.Timestamp("2026-05-04 22:01")  # domingo 18:01 NY
+    t = start
+    while t < start + pd.Timedelta(days=days):
+        if not (t.hour == 21 and t.minute > 0) and not (t.hour == 22 and t.minute == 0):
+            price += math.sin(t.value / 6e11) * 2
+            o = price; c = price + math.cos(t.value / 3e11)
+            lines.append(f"{t:%Y%m%d %H%M%S};{o:.2f};{max(o, c) + 1:.2f};{min(o, c) - 1:.2f};{c:.2f};100")
+        t += pd.Timedelta(minutes=1)
+    path.write_text("\n".join(lines))
+    return path
+
+
+def test_loader_converts_utc_to_new_york(tmp_path):
+    df = bt.load_nt_export(write_export(tmp_path / "x.txt", 1))
+    assert str(df.index[0]) == "2026-05-04 18:01:00"
+
+
+def test_engine_respects_rules(tmp_path):
+    df = bt.load_nt_export(write_export(tmp_path / "x.txt", 3))
+    always_buy = lambda ctx: {"action": "BUY", "confidence": 1.0, "reason": "t"}
+    res = bt.Backtester(df, bt.Params(), always_buy).run()
+    s = res["stats"]
+    assert s["trades"] > 0
+    per_day = {}
+    for t in res["trades"]:
+        hhmm = t["entry_time"][11:16]
+        assert "09:35" <= hhmm <= "15:46"                      # solo dentro del horario
+        per_day[t["entry_time"][:10]] = per_day.get(t["entry_time"][:10], 0) + 1
+        assert abs(t["entry_price"] - t["stop"]) / 0.25 <= 160  # stop máximo
+    assert max(per_day.values()) <= 4                           # máx trades/día
+    assert min(res["daily"].values()) >= -200 - 30              # pérdida diaria (+ deslizamiento)
+
+
+def test_low_confidence_blocks(tmp_path):
+    df = bt.load_nt_export(write_export(tmp_path / "x.txt", 2))
+    weak = lambda ctx: {"action": "BUY", "confidence": 0.3, "reason": "t"}
+    res = bt.Backtester(df, bt.Params(), weak).run()
+    assert res["stats"]["trades"] == 0 and res["stats"]["blocked"]["confianza"] > 0
+
+
+def test_backtest_api(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "BT_HISTORY_FILE", tmp_path / "h.json")
+    src = write_export(tmp_path / "src.txt", 3).read_bytes()
+    r = client.post("/api/backtest/upload?name=mnq.txt", content=src, headers=PANEL)
+    assert r.status_code == 200 and r.json()["rows"] > 1000
+    assert client.post("/api/backtest/upload?name=bad.txt", content=b"hola", headers=PANEL).status_code == 400
+    assert "mnq.txt" in [f["name"] for f in client.get("/api/backtest/files").json()]
+    assert client.post("/api/backtest/start", json={"file": "mnq.txt", "strategy": "ema"}, headers=PANEL).status_code == 200
+    for _ in range(100):
+        st = client.get("/api/backtest/status").json()
+        if not st["running"]:
+            break
+        time.sleep(0.1)
+    assert st["error"] is None and st["result"]["meta"]["strategy"] == "ema"
+    assert st["history"][0]["strategy"] == "ema"
+    assert client.post("/api/backtest/start", json={"file": "../etc/passwd", "strategy": "ema"}, headers=PANEL).status_code == 404

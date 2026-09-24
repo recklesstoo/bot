@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -27,6 +28,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+import backtest as bt
 from indicators import add_indicators
 
 load_dotenv()
@@ -486,6 +488,141 @@ def api_chat(body: ChatIn):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ollama no respondió: {e}")
     return {"reply": reply, "latency_ms": int((time.monotonic() - t0) * 1000)}
+
+
+# =========================================
+# Backtest con datos históricos (panel)
+# =========================================
+DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).resolve().parent / "data")))
+BT_HISTORY_FILE = DATA_DIR / "bt_history.json"
+BT = {"running": False, "done": 0, "total": 0, "result": None, "error": None,
+      "params": None, "started": None, "finished": None}
+_bt_cancel = threading.Event()
+STRATEGY_NAMES = {"qwen": "IA (Ollama)", "ema": "Cruce EMA (referencia)", "random": "Azar (referencia)"}
+
+
+def _bt_history() -> list:
+    try:
+        return json.loads(BT_HISTORY_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _safe_data_path(name: str) -> Path:
+    path = DATA_DIR / Path(name).name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    return path
+
+
+@app.get("/api/backtest/files")
+def bt_files():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted((f for f in DATA_DIR.iterdir() if f.suffix.lower() in (".txt", ".csv")),
+                   key=lambda f: f.stat().st_mtime, reverse=True)
+    return [{"name": f.name, "size_mb": round(f.stat().st_size / 1e6, 1)} for f in files]
+
+
+@app.post("/api/backtest/upload", dependencies=[Depends(require_panel)])
+async def bt_upload(request: Request, name: str):
+    safe = re.sub(r"[^A-Za-z0-9._ -]", "_", Path(name).name)[:120]
+    if not safe.lower().endswith((".txt", ".csv")):
+        raise HTTPException(status_code=400, detail="Sube el .txt exportado de NinjaTrader")
+    body = await request.body()
+    if len(body) > 300_000_000:
+        raise HTTPException(status_code=413, detail="Archivo demasiado grande (máx. 300 MB)")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = DATA_DIR / safe
+    path.write_bytes(body)
+    try:
+        df = bt.load_nt_export(path)
+    except Exception as e:
+        path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Formato no reconocido (se espera 'yyyyMMdd HHmmss;O;H;L;C;V'): {e}")
+    add_event("Backtest", f"Datos cargados: {safe} ({len(df)} velas, {df.index[0]:%Y-%m-%d} a {df.index[-1]:%Y-%m-%d})")
+    return {"name": safe, "rows": len(df), "start": str(df.index[0]), "end": str(df.index[-1])}
+
+
+class BacktestIn(BaseModel):
+    file: str
+    strategy: str = "qwen"
+    days: int = 0
+    min_confidence: float = 0.65
+    tz: str = "UTC"
+
+
+def _downsample(points: list, n: int = 600) -> list:
+    if len(points) <= n:
+        return points
+    step = len(points) / n
+    return [points[int(i * step)] for i in range(n)] + [points[-1]]
+
+
+def _bt_worker(path: Path, body: BacktestIn):
+    t0 = time.time()
+
+    def progress(done, total):
+        BT.update(done=done, total=total)
+    try:
+        df1 = bt.slice_days(bt.load_nt_export(path, body.tz), body.days or None)
+        strategy = bt.build_strategy(body.strategy, DATA_DIR)
+        params = bt.Params(min_confidence=body.min_confidence)
+        res = bt.Backtester(df1, params, strategy, progress, _bt_cancel).run()
+        res["equity"] = _downsample(res["equity"])
+        res["trades"] = res["trades"][-300:]
+        res["meta"] = {"file": path.name, "strategy": body.strategy, "strategy_name": STRATEGY_NAMES.get(body.strategy, body.strategy),
+                       "model": MODEL if body.strategy == "qwen" else None, "days": body.days,
+                       "min_confidence": body.min_confidence, "seconds": round(time.time() - t0)}
+        BT["result"] = res
+        s = res["stats"]
+        if not res["cancelled"]:
+            hist = _bt_history()
+            hist.append({"ts": now_iso(), **res["meta"], **{k: s[k] for k in (
+                "trades", "net_pnl", "win_rate", "profit_factor", "max_drawdown", "expectancy", "green_days", "red_days")}})
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            BT_HISTORY_FILE.write_text(json.dumps(hist[-50:], ensure_ascii=False, indent=1), encoding="utf-8")
+        add_event("Backtest", f"{'Cancelado' if res['cancelled'] else 'Terminado'}: {res['meta']['strategy_name']} → "
+                              f"{s['trades']} trades, PnL {s['net_pnl']:+.2f} $, aciertos {s['win_rate']:.0%}")
+    except Exception as e:
+        log.exception("Backtest falló")
+        BT["error"] = str(e)
+        add_event("Backtest", f"Error: {e}")
+    finally:
+        BT.update(running=False, finished=now_iso())
+
+
+@app.post("/api/backtest/start", dependencies=[Depends(require_panel)])
+def bt_start(body: BacktestIn):
+    if BT["running"]:
+        raise HTTPException(status_code=409, detail="Ya hay un backtest en marcha")
+    if body.strategy not in STRATEGY_NAMES:
+        raise HTTPException(status_code=400, detail="Estrategia desconocida")
+    path = _safe_data_path(body.file)
+    if body.strategy == "qwen" and not check_ollama(max_age=0)["ok"]:
+        raise HTTPException(status_code=409, detail="Ollama no está disponible: arráncalo antes de probar la IA")
+    _bt_cancel.clear()
+    BT.update(running=True, done=0, total=0, result=None, error=None, started=now_iso(), finished=None,
+              started_ts=time.time(), params=body.model_dump())
+    add_event("Backtest", f"Iniciado: {STRATEGY_NAMES[body.strategy]} con {path.name}"
+                          + (f" (últimos {body.days} días)" if body.days else ""))
+    threading.Thread(target=_bt_worker, args=(path, body), daemon=True).start()
+    return {"started": True}
+
+
+@app.post("/api/backtest/stop", dependencies=[Depends(require_panel)])
+def bt_stop():
+    _bt_cancel.set()
+    return {"stopping": BT["running"]}
+
+
+@app.get("/api/backtest/status")
+def bt_status():
+    out = {k: v for k, v in BT.items() if k != "started_ts"}
+    if BT["running"] and BT["done"] > 0:
+        elapsed = time.time() - BT.get("started_ts", time.time())
+        out["eta_sec"] = int(elapsed / BT["done"] * max(BT["total"] - BT["done"], 0))
+    out["history"] = _bt_history()[-12:][::-1]
+    return out
 
 
 load_recent_decisions()

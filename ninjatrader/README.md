@@ -86,6 +86,20 @@ Con el servidor encendido, abre **http://127.0.0.1:8000** en el navegador:
 
 NinjaTrader se conecta al panel con un latido cada segundo cuando la estrategia está activa en tiempo real. Si un comando del panel no llega a NinjaTrader en 15 s, caduca y nunca se ejecuta tarde. Puedes desactivar las órdenes manuales con el parámetro **Permitir órdenes desde el panel**.
 
+## Backtest con datos históricos
+
+En el panel, la sección **Backtest** prueba el bot sobre datos pasados con **las mismas reglas que en vivo**: horario, stop y target por ATR, pérdida diaria, máximo de trades y confianza mínima. Incluye comisiones (0.62 $ por lado) y 1 tick de deslizamiento.
+
+1. En NinjaTrader: **Tools → Historical Data → Export**, instrumento MNQ, velas de **1 minuto**. Así el backtest puede saber si se tocó antes el stop o el target.
+2. En el panel: **📂 Subir archivo .txt**, elige la estrategia y pulsa **▶ Ejecutar backtest**.
+3. Compara en la tabla **Comparativa**:
+   - **IA (Ollama):** tu modelo, con el mismo prompt que en vivo. Tarda 1–2 s por vela; las respuestas se guardan en caché, así que repetirlo es instantáneo.
+   - **Cruce EMA** y **Azar:** referencias. Si la IA no supera al azar después de comisiones, no tiene ventaja.
+
+No lances el backtest de la IA mientras el bot opera en vivo: los dos usarían Ollama a la vez.
+
+Desde la terminal: `python backtest.py datos.txt --strategy ema|random|qwen [--days 10]`.
+
 ## Parámetros
 
 | Grupo | Parámetro | Por defecto | Qué hace |
