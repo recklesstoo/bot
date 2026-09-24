@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel del Bot</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel2: #1c232d; --line: #2a3340;
+    --text: #e6edf3; --muted: #8b98a8; --accent: #4c9ffe;
+    --green: #2fbf71; --red: #f0524f; --amber: #e3a008;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+           padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px;
+          background: var(--panel2); border: 1px solid var(--line); font-size: 13px; white-space: nowrap;
+          max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .ok .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .bad .dot { background: var(--red); }
+  .warn .dot { background: var(--amber); }
+  main { display: grid; gap: 16px; padding: 16px 20px 40px; grid-template-columns: repeat(12, 1fr); max-width: 1500px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+  .span4 { grid-column: span 4; } .span5 { grid-column: span 5; } .span7 { grid-column: span 7; } .span8 { grid-column: span 8; } .span12 { grid-column: span 12; }
+  @media (max-width: 1000px) { .span4, .span5, .span7, .span8 { grid-column: span 12; } main { padding: 12px 16px 32px; } }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
+  .stat { background: var(--panel2); border-radius: 8px; padding: 10px 12px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; overflow-wrap: anywhere; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .meter { height: 8px; background: var(--panel2); border-radius: 99px; overflow: hidden; margin-top: 8px; }
+  .meter > div { height: 100%; background: var(--green); width: 0; transition: width .4s; }
+  .btns { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  button { font: inherit; font-weight: 600; color: var(--text); background: var(--panel2); border: 1px solid var(--line);
+           border-radius: 8px; padding: 11px 12px; cursor: pointer; transition: filter .15s, transform .05s; }
+  button:hover { filter: brightness(1.25); } button:active { transform: translateY(1px); }
+  button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+  .b-buy { background: #143d29; border-color: #1f6b44; } .b-sell { background: #4a1c1c; border-color: #7d2b2a; }
+  .b-exit { background: #3d3212; border-color: #6e5816; } .b-blue { background: #15304f; border-color: #22538a; }
+  .sub { color: var(--muted); font-size: 12px; margin: 14px 0 8px; }
+  .result { margin-top: 12px; background: var(--panel2); border-radius: 8px; padding: 10px 12px; font-size: 13px; min-height: 40px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .table-wrap { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #decisions td:last-child { min-width: 240px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 5px; font-weight: 700; font-size: 12px; }
+  .t-BUY { background: #143d29; color: #5ee29a; } .t-SELL { background: #4a1c1c; color: #ff8a87; }
+  .t-EXIT { background: #3d3212; color: #f5c451; } .t-HOLD { background: var(--panel2); color: var(--muted); }
+  .log { max-height: 420px; overflow-y: auto; font: 12.5px/1.5 ui-monospace, Consolas, monospace; }
+  .log div { padding: 3px 0; border-bottom: 1px dashed var(--line); overflow-wrap: anywhere; }
+  .log .src { color: var(--accent); } .log .time { color: var(--muted); }
+  .chat { display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow-y: auto; margin-bottom: 10px; }
+  .msg { padding: 8px 12px; border-radius: 10px; max-width: 90%; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.me { align-self: flex-end; background: #15304f; } .msg.ai { align-self: flex-start; background: var(--panel2); }
+  .row { display: flex; gap: 8px; } .row input { flex: 1; min-width: 0; }
+  input { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .empty { color: var(--muted); padding: 10px 0; }
+  .banner { grid-column: span 12; padding: 10px 14px; border-radius: 8px; background: #4a1c1c; border: 1px solid #7d2b2a; display: none; }
+  .banner.show { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 Panel del Bot · NinjaTrader + IA local</h1>
+  <div class="pills">
+    <span class="pill" id="p-server"><span class="dot"></span>Servidor</span>
+    <span class="pill" id="p-ollama"><span class="dot"></span>Ollama</span>
+    <span class="pill" id="p-nt"><span class="dot"></span>NinjaTrader</span>
+    <span class="pill" id="p-ai"><span class="dot"></span>IA</span>
+  </div>
+</header>
+
+<main>
+  <div class="banner" id="banner"></div>
+
+  <section class="card span7">
+    <h2>NinjaTrader</h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Cuenta</div><div class="v" id="s-account">—</div></div>
+      <div class="stat"><div class="k">Instrumento</div><div class="v" id="s-instr">—</div></div>
+      <div class="stat"><div class="k">Posición</div><div class="v" id="s-pos">—</div></div>
+      <div class="stat"><div class="k">Precio</div><div class="v" id="s-price">—</div></div>
+      <div class="stat"><div class="k">PnL abierto</div><div class="v" id="s-upnl">—</div></div>
+      <div class="stat"><div class="k">PnL del día</div><div class="v" id="s-dpnl">—</div></div>
+      <div class="stat"><div class="k">Trades hoy</div><div class="v" id="s-trades">—</div></div>
+      <div class="stat"><div class="k">Horario</div><div class="v" id="s-hours">—</div></div>
+    </div>
+    <div class="sub" id="s-risk-label">Pérdida diaria usada</div>
+    <div class="meter"><div id="s-risk"></div></div>
+  </section>
+
+  <section class="card span5">
+    <h2>Pruebas y control</h2>
+    <div class="btns">
+      <button class="b-blue" id="btn-ping">📡 Probar conexión NT</button>
+      <button class="b-blue" id="btn-test">🧠 Probar IA</button>
+      <button id="btn-pause">⏸ Pausar IA</button>
+    </div>
+    <div class="sub">Órdenes manuales (1 contrato, con stop y target automáticos)</div>
+    <div class="btns">
+      <button class="b-buy" id="btn-buy">▲ Comprar</button>
+      <button class="b-sell" id="btn-sell">▼ Vender</button>
+      <button class="b-exit" id="btn-exit">✕ Cerrar posición</button>
+    </div>
+    <div class="result" id="result">Pulsa un botón para probar.</div>
+  </section>
+
+  <section class="card span7">
+    <h2>Decisiones de la IA</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Hora</th><th>Acción</th><th>Conf.</th><th>Precio</th><th>Pos.</th><th>Razón</th></tr></thead>
+        <tbody id="decisions"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card span5">
+    <h2>Registro de actividad</h2>
+    <div class="log" id="events"></div>
+  </section>
+
+  <section class="card span12">
+    <h2>Chat con Ollama</h2>
+    <div class="chat" id="chat"><div class="empty">Pregúntale a la IA, por ejemplo: "¿Por qué no has entrado en la última vela?"</div></div>
+    <form class="row" id="chat-form">
+      <input id="chat-input" placeholder="Escribe un mensaje…" autocomplete="off">
+      <button class="b-blue" type="submit" id="chat-send">Enviar</button>
+    </form>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const money = v => (v == null ? "—" : (v < 0 ? "-" : "") + "$" + Math.abs(v).toFixed(2));
+const hhmm = iso => { try { return new Date(iso).toLocaleTimeString("es-PA", {hour:"2-digit", minute:"2-digit", second:"2-digit"}); } catch { return iso; } };
+const pill = (id, cls, text, title) => { const el = $(id); el.className = "pill " + cls; el.lastChild.textContent = text; el.title = title || text; };
+
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Panel": "1" }, body: JSON.stringify(body || {}) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || ("HTTP " + r.status));
+  return data;
+}
+function show(text) { $("result").textContent = text; }
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/state");
+    state = await r.json();
+    render();
+  } catch (e) {
+    pill("p-server", "bad", "Servidor caído");
+    pill("p-ollama", "", "Ollama"); pill("p-nt", "", "NinjaTrader"); pill("p-ai", "", "IA");
+  }
+}
+
+function render() {
+  const s = state, nt = s.nt.status;
+  pill("p-server", "ok", "Servidor");
+  const oErr = s.ollama.error || "";
+  pill("p-ollama", s.ollama.ok ? "ok" : "bad",
+       s.ollama.ok ? "Ollama · " + s.model : (/no descargado/.test(oErr) ? "Ollama: falta el modelo" : "Ollama: sin conexión"), oErr || undefined);
+  pill("p-nt", s.nt.connected ? "ok" : "bad",
+       s.nt.connected ? "NinjaTrader conectado" : (nt ? `NinjaTrader desconectado (hace ${Math.round(s.nt.seconds_ago)} s)` : "NinjaTrader sin conectar"));
+  pill("p-ai", s.paused ? "warn" : "ok", s.paused ? "IA en pausa" : "IA activa");
+  $("btn-pause").textContent = s.paused ? "▶ Reanudar IA" : "⏸ Pausar IA";
+
+  const banner = $("banner");
+  if (nt && nt.halted) { banner.textContent = "⛔ Pérdida diaria máxima alcanzada: el bot no abrirá más operaciones hasta la próxima sesión."; banner.classList.add("show"); }
+  else banner.classList.remove("show");
+
+  const off = !s.nt.connected;
+  ["btn-ping", "btn-buy", "btn-sell", "btn-exit"].forEach(id => $(id).disabled = off);
+  if (nt && !nt.manual_enabled) ["btn-buy", "btn-sell", "btn-exit"].forEach(id => $(id).disabled = true);
+
+  if (nt) {
+    $("s-account").textContent = nt.account || "—";
+    $("s-instr").textContent = nt.instrument || "—";
+    const posCls = nt.position === "LONG" ? "pos" : nt.position === "SHORT" ? "neg" : "";
+    $("s-pos").innerHTML = `<span class="${posCls}">${esc(nt.position)}${nt.qty ? " × " + nt.qty : ""}</span>` + (nt.qty ? `<div class="k">@ ${nt.avg_price.toFixed(2)}</div>` : "");
+    $("s-price").textContent = nt.last_price ? nt.last_price.toFixed(2) : "—";
+    $("s-upnl").innerHTML = `<span class="${nt.unrealized_pnl >= 0 ? "pos" : "neg"}">${money(nt.unrealized_pnl)}</span>`;
+    $("s-dpnl").innerHTML = `<span class="${nt.daily_pnl >= 0 ? "pos" : "neg"}">${money(nt.daily_pnl)}</span>`;
+    $("s-trades").textContent = `${nt.trades_today} / ${nt.max_trades}`;
+    $("s-hours").innerHTML = nt.in_hours ? '<span class="pos">Dentro</span>' : '<span class="neg">Fuera</span>';
+    const used = nt.max_daily_loss ? Math.min(100, Math.max(0, -nt.daily_pnl / nt.max_daily_loss * 100)) : 0;
+    $("s-risk").style.width = used + "%";
+    $("s-risk").style.background = used > 75 ? "var(--red)" : used > 40 ? "var(--amber)" : "var(--green)";
+    $("s-risk-label").textContent = `Pérdida diaria usada: ${money(Math.max(0, -nt.daily_pnl))} de ${money(nt.max_daily_loss)}`;
+  }
+
+  $("decisions").innerHTML = s.decisions.length ? s.decisions.map(d => `
+    <tr><td class="num">${hhmm(d.ts)}</td><td><span class="tag t-${esc(d.action)}">${esc(d.action)}</span></td>
+    <td class="num">${d.confidence != null ? Number(d.confidence).toFixed(2) : ""}</td><td class="num">${d.close != null ? Number(d.close).toFixed(2) : ""}</td>
+    <td>${esc(d.position)}</td><td>${esc(d.reason)}</td></tr>`).join("")
+    : `<tr><td colspan="6" class="empty">Aún no hay decisiones. Aparecen al cierre de cada vela dentro del horario.</td></tr>`;
+
+  $("events").innerHTML = s.events.length ? s.events.map(e =>
+    `<div><span class="time">${hhmm(e.ts)}</span> <span class="src">[${esc(e.source)}]</span> ${esc(e.text)}</div>`).join("")
+    : `<div class="empty">Sin actividad todavía.</div>`;
+}
+
+async function command(type, confirmText) {
+  if (confirmText) {
+    const acc = state?.nt?.status?.account || "?";
+    const real = !/sim|playback|replay/i.test(acc);
+    if (!confirm(`${confirmText}\n\nCuenta: ${acc}${real ? "\n\n⚠️ ESTA PARECE UNA CUENTA REAL. Se enviará una orden de verdad." : ""}`)) return;
+  }
+  show(`Enviando ${type} a NinjaTrader…`);
+  try {
+    const cmd = await post("/api/command", { type });
+    const t0 = Date.now();
+    const timer = setInterval(async () => {
+      const r = await fetch("/api/state").then(r => r.json()).catch(() => null);
+      const c = r?.commands.find(x => x.id === cmd.id);
+      if (c && (c.status === "done" || c.status === "expired")) {
+        clearInterval(timer);
+        show(c.status === "done" ? `✅ ${type}: ${c.result}\nTiempo de ida y vuelta: ${c.latency_ms} ms` : `❌ ${c.result}`);
+      } else if (Date.now() - t0 > 20000) {
+        clearInterval(timer);
+        show(`❌ NinjaTrader no respondió a ${type} en 20 s.`);
+      }
+    }, 500);
+  } catch (e) { show("❌ " + e.message); }
+}
+
+$("btn-ping").onclick = () => command("PING");
+$("btn-buy").onclick  = () => command("BUY",  "¿Enviar orden de COMPRA a mercado (1 contrato)?");
+$("btn-sell").onclick = () => command("SELL", "¿Enviar orden de VENTA a mercado (1 contrato)?");
+$("btn-exit").onclick = () => command("EXIT", "¿Cerrar la posición abierta?");
+
+$("btn-pause").onclick = async () => {
+  try { const r = await post("/api/pause", { paused: !state.paused }); show(r.paused ? "⏸ IA en pausa: no abrirá operaciones nuevas (los stops siguen activos)." : "▶ IA reanudada."); refresh(); }
+  catch (e) { show("❌ " + e.message); }
+};
+
+$("btn-test").onclick = async () => {
+  const b = $("btn-test"); b.disabled = true;
+  show("Preguntando a la IA… (la primera vez puede tardar mientras carga el modelo)");
+  try {
+    const r = await post("/api/test-ai");
+    show(`🧠 ${r.action}  confianza ${Number(r.confidence).toFixed(2)}  ·  ${r.latency_ms} ms\n${r.reason}\n\nDatos usados: ${r.source}\n(Prueba: no se envía ninguna orden)`);
+  } catch (e) { show("❌ " + e.message); }
+  b.disabled = false;
+};
+
+$("chat-form").onsubmit = async ev => {
+  ev.preventDefault();
+  const input = $("chat-input"), text = input.value.trim();
+  if (!text) return;
+  const chat = $("chat");
+  if (chat.querySelector(".empty")) chat.innerHTML = "";
+  chat.insertAdjacentHTML("beforeend", `<div class="msg me">${esc(text)}</div>`);
+  const pending = document.createElement("div"); pending.className = "msg ai"; pending.textContent = "…"; chat.appendChild(pending);
+  chat.scrollTop = chat.scrollHeight; input.value = ""; $("chat-send").disabled = true;
+  try { const r = await post("/api/chat", { message: text }); pending.textContent = r.reply; }
+  catch (e) { pending.textContent = "❌ " + e.message; }
+  $("chat-send").disabled = false; chat.scrollTop = chat.scrollHeight;
+};
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

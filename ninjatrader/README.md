@@ -70,6 +70,22 @@ En MNQ, 1 tick = 0.25 puntos = **0.50 $** y 1 punto = **2 $** por contrato.
 
 Con 200 $ de límite diario caben entre 2 y 4 stops seguidos. Por ejemplo, si llevas -150 $ en el día, el bot solo abre una operación si su stop cuesta 50 $ o menos; si no, la bloquea. La pérdida del día solo puede pasar de 200 $ por deslizamiento (slippage) en el stop o por un hueco de precio (gap).
 
+## Panel del bot (http://127.0.0.1:8000)
+
+Con el servidor encendido, abre **http://127.0.0.1:8000** en el navegador:
+
+- **Estado en vivo:** servidor, Ollama y NinjaTrader conectados o no; cuenta, posición, precio, PnL abierto y del día, y barra de pérdida diaria usada.
+- **Decisiones de la IA:** cada vela, con acción, confianza y razón.
+- **Registro de actividad:** lo que hace NinjaTrader (órdenes, ejecuciones, rechazos, bloqueos por riesgo).
+- **Botones:**
+  - 📡 **Probar conexión NT:** NinjaTrader responde "PONG" con la cuenta y el tiempo de ida y vuelta.
+  - 🧠 **Probar IA:** pregunta a Ollama con las últimas velas reales (o de ejemplo) **sin enviar órdenes**.
+  - ⏸ **Pausar / Reanudar IA:** en pausa no abre operaciones nuevas; los stops y el control de riesgo siguen activos.
+  - ▲ **Comprar**, ▼ **Vender**, ✕ **Cerrar:** órdenes manuales de prueba que pasan por las mismas reglas de riesgo (stop, target, pérdida diaria, máximo de trades). Piden confirmación y avisan si la cuenta parece real.
+- **Chat con Ollama:** pregúntale a la IA lo que quieras sobre el estado del bot.
+
+NinjaTrader se conecta al panel con un latido cada segundo cuando la estrategia está activa en tiempo real. Si un comando del panel no llega a NinjaTrader en 15 s, caduca y nunca se ejecuta tarde. Puedes desactivar las órdenes manuales con el parámetro **Permitir órdenes desde el panel**.
+
 ## Parámetros
 
 | Grupo | Parámetro | Por defecto | Qué hace |

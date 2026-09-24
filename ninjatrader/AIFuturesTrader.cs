@@ -1,5 +1,6 @@
 #region Using declarations
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
@@ -32,6 +33,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private double sessionStartCumProfit;
 		private int    tradesToday;
 		private bool   haltedToday;
+
+		// Panel: latido cada segundo hacia ai_server (estado + comandos manuales)
+		private System.Threading.Timer heartbeatTimer;
+		private volatile bool heartbeatInFlight;
+		private readonly object panelLock = new object();
+		private readonly List<string> pendingEvents = new List<string>();
+		private readonly List<string> pendingAcks   = new List<string>();
 
 		protected override void OnStateChange()
 		{
@@ -72,6 +80,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				StartTime         = 93500;
 				EndTime           = 154500;
 				FlattenOutsideHours = true;
+				AllowManualOrders   = true;
 			}
 			else if (State == State.DataLoaded)
 			{
@@ -84,6 +93,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (chartTz == null)
 					chartTz = TimeZoneInfo.Local;
 				newYorkTz = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+			}
+			else if (State == State.Realtime)
+			{
+				heartbeatTimer = new System.Threading.Timer(o => Heartbeat(), null, 1000, 1000);
+				Log("Estrategia en tiempo real. Cuenta: " + Account.Name);
+			}
+			else if (State == State.Terminated)
+			{
+				if (heartbeatTimer != null)
+				{
+					heartbeatTimer.Dispose();
+					heartbeatTimer = null;
+				}
 			}
 		}
 
@@ -107,7 +129,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (!haltedToday && dailyPnl <= -MaxDailyLoss)
 			{
 				haltedToday = true;
-				Print(string.Format("{0} [AI] Pérdida diaria máxima alcanzada ({1:C}). Cerrando y deteniendo hasta la próxima sesión.", Time[0], dailyPnl));
+				Log(string.Format("Pérdida diaria máxima alcanzada ({0:C}). Cerrando y deteniendo hasta la próxima sesión.", dailyPnl));
 				Flatten("AI DailyLoss");
 			}
 			if (haltedToday)
@@ -118,7 +140,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			{
 				if (FlattenOutsideHours && Position.MarketPosition != MarketPosition.Flat)
 				{
-					Print(string.Format("{0} [AI] Fuera de horario, cerrando posición.", Time[0]));
+					Log("Fuera de horario, cerrando posición.");
 					Flatten("AI Hours");
 				}
 				return;
@@ -141,7 +163,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				catch (Exception ex) { error = ex.Message; }
 
 				try   { TriggerCustomEvent(o => HandleResponse(response, error, barAtRequest), null); }
-				catch (Exception ex) { requestInFlight = false; Print("[AI] Error despachando respuesta: " + ex.Message); }
+				catch (Exception ex) { requestInFlight = false; Log("Error despachando respuesta: " + ex.Message); }
 			});
 		}
 
@@ -153,12 +175,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if (error != null)
 			{
-				Print(string.Format("{0} [AI] Sin respuesta del servidor ({1}). No se opera.", Time[0], error));
+				Log(string.Format("Sin respuesta del servidor ({0}). No se opera.", error));
 				return;
 			}
 			if (CurrentBar != barAtRequest)
 			{
-				Print(string.Format("{0} [AI] Respuesta llegó tarde (vela ya cerrada). Se descarta.", Time[0]));
+				Log("Respuesta llegó tarde (vela ya cerrada). Se descarta.");
 				return;
 			}
 
@@ -166,7 +188,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			double confidence = JsonNumber(response, "confidence");
 			string reason     = JsonString(response, "reason");
 
-			Print(string.Format("{0} [AI] {1} conf={2:0.00} pos={3} | {4}", Time[0], action, confidence, Position.MarketPosition, reason));
+			Log(string.Format("{0} conf={1:0.00} pos={2} | {3}", action, confidence, Position.MarketPosition, reason));
 
 			if (action != "EXIT" && confidence < MinConfidence)
 				return;
@@ -174,41 +196,44 @@ namespace NinjaTrader.NinjaScript.Strategies
 			Execute(action);
 		}
 
-		private void Execute(string action)
+		private string Execute(string action)
 		{
 			MarketPosition mp = Position.MarketPosition;
 
 			switch (action)
 			{
 				case "BUY":
-					if (mp == MarketPosition.Long) return;
-					if (mp == MarketPosition.Short && !AllowReversal) { ExitShort(Position.Quantity, "AI Exit", ShortSignal); return; }
-					if (!CanOpen()) return;
+					if (mp == MarketPosition.Long) return "Ya hay posición larga";
+					if (mp == MarketPosition.Short && !AllowReversal) { ExitShort(Position.Quantity, "AI Exit", ShortSignal); return "Cerrando corto"; }
+					if (!CanOpen()) return "Bloqueada por reglas de riesgo (ver registro)";
 					SetBracket(LongSignal, StopTicks());
 					EnterLong(Quantity, LongSignal);
 					tradesToday++;
-					break;
+					return "Orden de compra enviada";
 
 				case "SELL":
-					if (mp == MarketPosition.Short) return;
-					if (mp == MarketPosition.Long && (!AllowReversal || !AllowShorts)) { ExitLong(Position.Quantity, "AI Exit", LongSignal); return; }
-					if (!AllowShorts || !CanOpen()) return;
+					if (mp == MarketPosition.Short) return "Ya hay posición corta";
+					if (mp == MarketPosition.Long && (!AllowReversal || !AllowShorts)) { ExitLong(Position.Quantity, "AI Exit", LongSignal); return "Cerrando largo"; }
+					if (!AllowShorts) return "Cortos deshabilitados";
+					if (!CanOpen()) return "Bloqueada por reglas de riesgo (ver registro)";
 					SetBracket(ShortSignal, StopTicks());
 					EnterShort(Quantity, ShortSignal);
 					tradesToday++;
-					break;
+					return "Orden de venta enviada";
 
 				case "EXIT":
+					if (mp == MarketPosition.Flat) return "No hay posición abierta";
 					Flatten("AI Exit");
-					break;
+					return "Cerrando posición";
 			}
+			return "Sin acción";
 		}
 
 		private bool CanOpen()
 		{
 			if (tradesToday >= MaxTradesPerDay)
 			{
-				Print(string.Format("{0} [AI] Máximo de trades diarios ({1}) alcanzado.", Time[0], MaxTradesPerDay));
+				Log(string.Format("Máximo de trades diarios ({0}) alcanzado.", MaxTradesPerDay));
 				return false;
 			}
 
@@ -218,7 +243,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			double risk   = StopTicks() * TickSize * Instrument.MasterInstrument.PointValue * Quantity;
 			if (risk > budget)
 			{
-				Print(string.Format("{0} [AI] Entrada bloqueada: riesgo del stop {1:C} > margen restante del día {2:C}.", Time[0], risk, budget));
+				Log(string.Format("Entrada bloqueada: riesgo del stop {0:C} > margen restante del día {1:C}.", risk, budget));
 				return false;
 			}
 			return true;
@@ -239,12 +264,153 @@ namespace NinjaTrader.NinjaScript.Strategies
 			int targetTicks = Math.Max(stopTicks, (int)Math.Round(atrTicks * TargetAtrMult));
 			SetStopLoss(signal, CalculationMode.Ticks, stopTicks, false);
 			SetProfitTarget(signal, CalculationMode.Ticks, targetTicks);
-			Print(string.Format("{0} [AI] {1}: stop={2} ticks, target={3} ticks", Time[0], signal, stopTicks, targetTicks));
+			Log(string.Format("{0}: stop={1} ticks, target={2} ticks", signal, stopTicks, targetTicks));
 		}
 
 		private DateTime NewYorkTime(DateTime chartTime)
 		{
 			return TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(chartTime, DateTimeKind.Unspecified), chartTz, newYorkTz);
+		}
+
+		// ===================== Panel (ai_server) =====================
+
+		private void Log(string msg)
+		{
+			Print(DateTime.Now.ToString("HH:mm:ss") + " [AI] " + msg);
+			lock (panelLock)
+			{
+				if (pendingEvents.Count < 200)
+					pendingEvents.Add(msg);
+			}
+		}
+
+		private string HeartbeatUrl()
+		{
+			string url = ServerUrl ?? "";
+			return url.EndsWith("/decide") ? url.Substring(0, url.Length - "/decide".Length) + "/nt/heartbeat" : url.TrimEnd('/') + "/nt/heartbeat";
+		}
+
+		// Corre en un hilo del temporizador: el estado se lee en el hilo de la
+		// estrategia (TriggerCustomEvent) y la llamada HTTP va en segundo plano.
+		private void Heartbeat()
+		{
+			if (heartbeatInFlight || State != State.Realtime)
+				return;
+			heartbeatInFlight = true;
+			try
+			{
+				TriggerCustomEvent(o =>
+				{
+					string payload, url, token;
+					try
+					{
+						payload = BuildHeartbeat();
+						url = HeartbeatUrl();
+						token = ApiToken;
+					}
+					catch (Exception ex)
+					{
+						heartbeatInFlight = false;
+						Print("[AI] Error preparando latido: " + ex.Message);
+						return;
+					}
+					Task.Run(() =>
+					{
+						string response = null;
+						try { response = Post(url, token, payload, 3000); }
+						catch { }
+						try
+						{
+							if (response != null)
+								TriggerCustomEvent(x => HandleCommands(response), null);
+						}
+						catch { }
+						finally { heartbeatInFlight = false; }
+					});
+				}, null);
+			}
+			catch { heartbeatInFlight = false; }
+		}
+
+		private string BuildHeartbeat()
+		{
+			CultureInfo ic = CultureInfo.InvariantCulture;
+			string pos = Position.MarketPosition == MarketPosition.Long ? "LONG"
+			           : Position.MarketPosition == MarketPosition.Short ? "SHORT" : "FLAT";
+			int now = ToTime(NewYorkTime(Time[0]));
+			double lastPrice = Close[0];
+			try { if (Bars.GetClose(Bars.Count - 1) > 0) lastPrice = Bars.GetClose(Bars.Count - 1); } catch { }
+			double unrealized = Position.MarketPosition == MarketPosition.Flat ? 0 : Position.GetUnrealizedProfitLoss(PerformanceUnit.Currency, lastPrice);
+
+			var sb = new StringBuilder(512);
+			sb.Append('{');
+			sb.AppendFormat(ic, "\"account\":\"{0}\",", Escape(Account.Name));
+			sb.AppendFormat(ic, "\"instrument\":\"{0}\",", Escape(Instrument.FullName));
+			sb.AppendFormat(ic, "\"state\":\"{0}\",", State);
+			sb.AppendFormat(ic, "\"position\":\"{0}\",", pos);
+			sb.AppendFormat(ic, "\"qty\":{0},", Position.Quantity);
+			sb.AppendFormat(ic, "\"avg_price\":{0},", Position.AveragePrice);
+			sb.AppendFormat(ic, "\"unrealized_pnl\":{0:0.##},", unrealized);
+			sb.AppendFormat(ic, "\"daily_pnl\":{0:0.##},", DailyPnl());
+			sb.AppendFormat(ic, "\"max_daily_loss\":{0},", MaxDailyLoss);
+			sb.AppendFormat(ic, "\"trades_today\":{0},", tradesToday);
+			sb.AppendFormat(ic, "\"max_trades\":{0},", MaxTradesPerDay);
+			sb.AppendFormat(ic, "\"halted\":{0},", haltedToday ? "true" : "false");
+			sb.AppendFormat(ic, "\"in_hours\":{0},", now >= StartTime && now <= EndTime ? "true" : "false");
+			sb.AppendFormat(ic, "\"last_price\":{0},", lastPrice);
+			sb.AppendFormat(ic, "\"bar_time\":\"{0:yyyy-MM-ddTHH:mm:ss}\",", Time[0]);
+			sb.AppendFormat(ic, "\"manual_enabled\":{0},", AllowManualOrders ? "true" : "false");
+
+			List<string> events, acks;
+			lock (panelLock)
+			{
+				events = new List<string>(pendingEvents);
+				acks   = new List<string>(pendingAcks);
+				pendingEvents.Clear();
+				pendingAcks.Clear();
+			}
+			sb.Append("\"events\":[");
+			for (int i = 0; i < events.Count; i++)
+				sb.Append(i > 0 ? "," : "").Append('"').Append(Escape(events[i])).Append('"');
+			sb.Append("],\"acks\":[").Append(string.Join(",", acks)).Append("]}");
+			return sb.ToString();
+		}
+
+		private void HandleCommands(string response)
+		{
+			if (State != State.Realtime)
+				return;
+			foreach (Match m in Regex.Matches(response, "\"id\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"type\"\\s*:\\s*\"([A-Z]+)\""))
+			{
+				string id = m.Groups[1].Value, type = m.Groups[2].Value, result;
+				if (type == "PING")
+					result = string.Format("PONG · cuenta {0} · {1} · posición {2}", Account.Name, Instrument.FullName, Position.MarketPosition);
+				else if (!AllowManualOrders)
+					result = "Órdenes manuales deshabilitadas en la estrategia";
+				else if (haltedToday && type != "EXIT")
+					result = "Bloqueado: pérdida diaria máxima alcanzada";
+				else
+					result = Execute(type);
+
+				Log(string.Format("Panel: {0} → {1}", type, result));
+				lock (panelLock)
+					pendingAcks.Add(string.Format("{{\"id\":\"{0}\",\"result\":\"{1}\"}}", Escape(id), Escape(result)));
+			}
+		}
+
+		protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity,
+			MarketPosition marketPosition, string orderId, DateTime time)
+		{
+			if (execution.Order != null)
+				Log(string.Format("Ejecutada: {0} {1} @ {2} ({3})", execution.Order.OrderAction, quantity,
+					price.ToString("0.00", CultureInfo.InvariantCulture), execution.Order.Name));
+		}
+
+		protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice, int quantity, int filled,
+			double averageFillPrice, OrderState orderState, DateTime time, ErrorCode error, string comment)
+		{
+			if (orderState == OrderState.Rejected)
+				Log(string.Format("Orden RECHAZADA: {0} {1} — {2}", order.OrderAction, order.Name, comment));
 		}
 
 		private void Flatten(string name)
@@ -315,7 +481,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		private static string Escape(string s)
 		{
-			return (s ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
+			return (s ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"")
+			                .Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
 		}
 
 		private static string JsonString(string json, string key)
@@ -416,6 +583,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[NinjaScriptProperty]
 		[Display(Name = "Cerrar fuera de horario", Order = 3, GroupName = "4. Horario")]
 		public bool FlattenOutsideHours { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Permitir órdenes desde el panel", Order = 1, GroupName = "5. Panel")]
+		public bool AllowManualOrders { get; set; }
 		#endregion
 	}
 }
