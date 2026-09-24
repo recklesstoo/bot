@@ -19,6 +19,19 @@ if (-not (Test-Path $nt)) {
 $dest = Join-Path $nt "bin\Custom\Strategies"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item -Force (Join-Path $Root "ninjatrader\AIFuturesTrader.cs") $dest
+$target = Join-Path $dest "AIFuturesTrader.cs"
+# NinjaTrader compila todo bin\Custom junto: cualquier otra copia de la clase
+# provoca errores CS0101/CS0111. Se mueven fuera de Custom como respaldo.
+$backup = Join-Path $nt "AIFuturesTrader_backup"
+Get-ChildItem (Join-Path $nt "bin\Custom") -Recurse -Filter *.cs |
+    Where-Object { $_.FullName -ne $target } |
+    Where-Object { Select-String -Path $_.FullName -Pattern "class\s+AIFuturesTrader\b" -Quiet } |
+    ForEach-Object {
+        New-Item -ItemType Directory -Force -Path $backup | Out-Null
+        $bk = Join-Path $backup ("{0}_{1}_{2:yyyyMMddHHmmss}.cs.bak" -f $_.Directory.Name, $_.BaseName, (Get-Date))
+        Move-Item -Force $_.FullName $bk
+        Warn "Copia duplicada movida: $($_.FullName) -> $bk"
+    }
 Ok "Copiado a $dest\AIFuturesTrader.cs"
 
 # 2. Python + dependencias del servidor
