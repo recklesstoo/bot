@@ -11,6 +11,15 @@ NinjaTrader 8  ── cierre de vela: POST /decide (velas + posición + PnL) ─
 - **Si algo falla, el bot no opera:** si Ollama está caído, la respuesta no es válida, llega tarde (ya cerró otra vela) o la confianza es baja, la acción es HOLD.
 - La IA solo se consulta en tiempo real, nunca con datos históricos.
 
+## Instalación rápida (Windows)
+
+1. Descarga el repo desde GitHub: rama `claude/laughing-ptolemy-95sg9p` → **Code → Download ZIP**, y descomprímelo (por ejemplo en `C:\bot`).
+2. Doble clic en **`INSTALAR.bat`**. Copia la estrategia a `Documentos\NinjaTrader 8\bin\Custom\Strategies\` (también si tus Documentos están en OneDrive), instala las dependencias de Python e instala Ollama con el modelo.
+3. Doble clic en **`INICIAR_SERVIDOR.bat`** y deja la ventana abierta.
+4. En NinjaTrader: **New → NinjaScript Editor → Strategies → AIFuturesTrader → F5**.
+
+Los pasos 1 a 3 de abajo explican lo mismo a mano.
+
 ## 1. Instalar la IA local (gratis)
 
 1. Instala Ollama: https://ollama.com/download (Windows)
