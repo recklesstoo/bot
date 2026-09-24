@@ -26,6 +26,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private const string ShortSignal = "AI Short";
 
 		private ATR    atr;
+		private TimeZoneInfo chartTz;
+		private TimeZoneInfo newYorkTz;
 		private volatile bool requestInFlight;
 		private double sessionStartCumProfit;
 		private int    tradesToday;
@@ -74,6 +76,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 			else if (State == State.DataLoaded)
 			{
 				atr = ATR(AtrPeriod);
+				// Las horas de Time[0] vienen en la zona configurada en NinjaTrader
+				// (Tools > Options > General). El horario se evalúa en hora de Nueva York
+				// para que el cambio de horario de verano (EE. UU.) se aplique solo.
+				try   { chartTz = NinjaTrader.Core.Globals.GeneralOptions.TimeZoneInfo; }
+				catch { chartTz = null; }
+				if (chartTz == null)
+					chartTz = TimeZoneInfo.Local;
+				newYorkTz = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
 			}
 		}
 
@@ -103,7 +113,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (haltedToday)
 				return;
 
-			int now = ToTime(Time[0]);
+			int now = ToTime(NewYorkTime(Time[0]));
 			if (now < StartTime || now > EndTime)
 			{
 				if (FlattenOutsideHours && Position.MarketPosition != MarketPosition.Flat)
@@ -230,6 +240,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 			SetStopLoss(signal, CalculationMode.Ticks, stopTicks, false);
 			SetProfitTarget(signal, CalculationMode.Ticks, targetTicks);
 			Print(string.Format("{0} [AI] {1}: stop={2} ticks, target={3} ticks", Time[0], signal, stopTicks, targetTicks));
+		}
+
+		private DateTime NewYorkTime(DateTime chartTime)
+		{
+			return TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(chartTime, DateTimeKind.Unspecified), chartTz, newYorkTz);
 		}
 
 		private void Flatten(string name)
@@ -390,12 +405,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "Hora inicio (HHmmss)", Order = 1, GroupName = "4. Horario")]
+		[Display(Name = "Hora inicio NY (HHmmss)", Order = 1, GroupName = "4. Horario")]
 		public int StartTime { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, 235959)]
-		[Display(Name = "Hora fin (HHmmss)", Order = 2, GroupName = "4. Horario")]
+		[Display(Name = "Hora fin NY (HHmmss)", Order = 2, GroupName = "4. Horario")]
 		public int EndTime { get; set; }
 
 		[NinjaScriptProperty]

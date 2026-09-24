@@ -75,7 +75,7 @@ Con 200 $ de límite diario caben entre 2 y 4 stops seguidos. Por ejemplo, si ll
 | Riesgo | Stop mín/máx (ticks) | 40 / 160 | Límites del stop (MNQ: 20 $ / 80 $ por contrato) |
 | Riesgo | Pérdida diaria máx ($) | 200 | Si se alcanza, cierra todo y no opera más hasta la próxima sesión. Además, **no se abre ninguna entrada cuyo stop pueda superar lo que queda de ese margen** |
 | Riesgo | Máx trades por día | 4 | |
-| Horario | Inicio / Fin (HHmmss) | 093500 / 154500 | **En la zona horaria de tu PC/NinjaTrader** (los valores por defecto asumen hora de Nueva York) |
+| Horario | Inicio / Fin NY (HHmmss) | 093500 / 154500 | **Siempre en hora de Nueva York**, la zona horaria de tu PC da igual. La estrategia convierte la hora y aplica sola el cambio de horario de EE. UU. En Panamá (UTC-5) equivale a 08:35–14:45 de marzo a noviembre y a 09:35–15:45 de noviembre a marzo |
 | Horario | Cerrar fuera de horario | Sí | Cierra la posición al salir de la ventana |
 
 La pérdida diaria se revisa al cierre de cada vela. Entre velas, lo que protege es el stop de cada operación, que está en el broker.
