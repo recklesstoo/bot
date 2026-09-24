@@ -62,11 +62,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				AtrPeriod         = 14;
 				StopAtrMult       = 1.5;
 				TargetAtrMult     = 3.0;
-				MinStopTicks      = 8;
-				MaxStopTicks      = 200;
+				MinStopTicks      = 40;   // MNQ: 10 puntos = 20 $ por contrato
+				MaxStopTicks      = 160;  // MNQ: 40 puntos = 80 $ por contrato
 
-				MaxDailyLoss      = 300;
-				MaxTradesPerDay   = 6;
+				MaxDailyLoss      = 200;
+				MaxTradesPerDay   = 4;
 				StartTime         = 93500;
 				EndTime           = 154500;
 				FlattenOutsideHours = true;
@@ -174,7 +174,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					if (mp == MarketPosition.Long) return;
 					if (mp == MarketPosition.Short && !AllowReversal) { ExitShort(Position.Quantity, "AI Exit", ShortSignal); return; }
 					if (!CanOpen()) return;
-					SetBracket(LongSignal);
+					SetBracket(LongSignal, StopTicks());
 					EnterLong(Quantity, LongSignal);
 					tradesToday++;
 					break;
@@ -183,7 +183,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					if (mp == MarketPosition.Short) return;
 					if (mp == MarketPosition.Long && (!AllowReversal || !AllowShorts)) { ExitLong(Position.Quantity, "AI Exit", LongSignal); return; }
 					if (!AllowShorts || !CanOpen()) return;
-					SetBracket(ShortSignal);
+					SetBracket(ShortSignal, StopTicks());
 					EnterShort(Quantity, ShortSignal);
 					tradesToday++;
 					break;
@@ -201,15 +201,31 @@ namespace NinjaTrader.NinjaScript.Strategies
 				Print(string.Format("{0} [AI] Máximo de trades diarios ({1}) alcanzado.", Time[0], MaxTradesPerDay));
 				return false;
 			}
+
+			// Solo se abre si, tocando el stop, el día no supera la pérdida máxima.
+			// Si hay una posición contraria abierta (reversión), su PnL flotante ya cuenta.
+			double budget = MaxDailyLoss + DailyPnl();
+			double risk   = StopTicks() * TickSize * Instrument.MasterInstrument.PointValue * Quantity;
+			if (risk > budget)
+			{
+				Print(string.Format("{0} [AI] Entrada bloqueada: riesgo del stop {1:C} > margen restante del día {2:C}.", Time[0], risk, budget));
+				return false;
+			}
 			return true;
 		}
 
-		// Stop y target en ticks a partir del ATR. Se fijan ANTES de la entrada,
-		// así la orden de protección sale en cuanto se llena la entrada.
-		private void SetBracket(string signal)
+		// Stop en ticks a partir del ATR, acotado entre el mínimo y el máximo.
+		private int StopTicks()
 		{
 			double atrTicks = atr[0] / TickSize;
-			int stopTicks   = Math.Min(MaxStopTicks, Math.Max(MinStopTicks, (int)Math.Round(atrTicks * StopAtrMult)));
+			return Math.Min(MaxStopTicks, Math.Max(MinStopTicks, (int)Math.Round(atrTicks * StopAtrMult)));
+		}
+
+		// Stop y target se fijan ANTES de la entrada, así la orden de protección
+		// sale en cuanto se llena la entrada.
+		private void SetBracket(string signal, int stopTicks)
+		{
+			double atrTicks = atr[0] / TickSize;
 			int targetTicks = Math.Max(stopTicks, (int)Math.Round(atrTicks * TargetAtrMult));
 			SetStopLoss(signal, CalculationMode.Ticks, stopTicks, false);
 			SetProfitTarget(signal, CalculationMode.Ticks, targetTicks);

@@ -48,6 +48,19 @@ Cada decisión se guarda en `ai_server/decisions.jsonl`.
 
 > Para operar con dinero real, NinjaTrader necesita una cuenta de broker de futuros conectada (NinjaTrader Brokerage, o un broker vía Rithmic/CQG) y licencia de live trading, o usar su propio broker.
 
+## Configuración por defecto: MNQ, 5 minutos, pérdida diaria de 200 $
+
+En MNQ, 1 tick = 0.25 puntos = **0.50 $** y 1 punto = **2 $** por contrato.
+
+| | Ticks | Puntos | $ con 1 contrato |
+|---|---|---|---|
+| Stop mínimo | 40 | 10 | 20 $ |
+| Stop máximo | 160 | 40 | 80 $ |
+| Stop típico (1.5 × ATR de 5 min, con ATR de ~15–25 pts) | 90–150 | 22–38 | 45–75 $ |
+| Target (3 × ATR, 2:1 respecto al stop) | 180–300 | 45–75 | 90–150 $ |
+
+Con 200 $ de límite diario caben entre 2 y 4 stops seguidos. Por ejemplo, si llevas -150 $ en el día, el bot solo abre una operación si su stop cuesta 50 $ o menos; si no, la bloquea. La pérdida del día solo puede pasar de 200 $ por deslizamiento (slippage) en el stop o por un hueco de precio (gap).
+
 ## Parámetros
 
 | Grupo | Parámetro | Por defecto | Qué hace |
@@ -59,9 +72,9 @@ Cada decisión se guarda en `ai_server/decisions.jsonl`.
 | Órdenes | Permitir cortos | Sí | Permite abrir posiciones en corto |
 | Órdenes | Permitir reversión directa | No | Si está en No, una señal contraria solo cierra la posición y no la da vuelta |
 | Riesgo | Stop / Target (x ATR) | 1.5 / 3.0 | Distancia del stop y del target |
-| Riesgo | Stop mín/máx (ticks) | 8 / 200 | Límites del stop |
-| Riesgo | Pérdida diaria máx ($) | 300 | Si se alcanza, cierra todo y no opera más hasta la próxima sesión |
-| Riesgo | Máx trades por día | 6 | |
+| Riesgo | Stop mín/máx (ticks) | 40 / 160 | Límites del stop (MNQ: 20 $ / 80 $ por contrato) |
+| Riesgo | Pérdida diaria máx ($) | 200 | Si se alcanza, cierra todo y no opera más hasta la próxima sesión. Además, **no se abre ninguna entrada cuyo stop pueda superar lo que queda de ese margen** |
+| Riesgo | Máx trades por día | 4 | |
 | Horario | Inicio / Fin (HHmmss) | 093500 / 154500 | **En la zona horaria de tu PC/NinjaTrader** (los valores por defecto asumen hora de Nueva York) |
 | Horario | Cerrar fuera de horario | Sí | Cierra la posición al salir de la ventana |
 
