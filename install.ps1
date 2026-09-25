@@ -54,14 +54,16 @@ $vpy  = Join-Path $venv "Scripts\python.exe"
 # si hay varias versiones de Python instaladas, mezclarlas rompe numpy/pandas.
 function Install-Deps {
     if (-not (Test-Path $vpy)) { & $py -m venv $venv }
-    & $vpy -m pip install --upgrade pip -q
+    try { & $vpy -m pip install --upgrade pip -q } catch { }
     & $vpy -m pip install -r (Join-Path $srv "requirements.txt") -q
     if ($LASTEXITCODE -ne 0) { throw "Fallo la instalacion de dependencias de Python." }
 }
 function Test-Deps {
     if (-not (Test-Path $vpy)) { return $false }
-    & $vpy -c "import numpy, pandas, fastapi, uvicorn, requests" *> $null
-    return ($LASTEXITCODE -eq 0)
+    try {
+        & $vpy -c "import numpy, pandas, fastapi, uvicorn, requests" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch { return $false }
 }
 Install-Deps
 if (-not (Test-Deps)) {
