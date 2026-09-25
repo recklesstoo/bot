@@ -20,6 +20,14 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":8000 .*LISTENING"') d
 )
 timeout /t 1 /nobreak >nul
 
+".venv\Scripts\python.exe" -c "import numpy, pandas, fastapi, uvicorn" >nul 2>&1
+if errorlevel 1 (
+  echo ERROR: las librerias de Python estan danadas o incompletas.
+  echo Ejecuta INSTALAR.bat de nuevo: detecta el problema y recrea el entorno.
+  pause
+  exit /b 1
+)
+
 echo Servidor de IA en http://127.0.0.1:8000  (no cierres esta ventana)
 ".venv\Scripts\python.exe" server.py
 pause

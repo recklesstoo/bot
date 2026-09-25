@@ -49,10 +49,28 @@ if (-not $py) {
 }
 $srv  = Join-Path $Root "ai_server"
 $venv = Join-Path $srv ".venv"
-if (-not (Test-Path $venv)) { & $py -m venv $venv }
-& (Join-Path $venv "Scripts\python.exe") -m pip install --upgrade pip -q
-& (Join-Path $venv "Scripts\python.exe") -m pip install -r (Join-Path $srv "requirements.txt") -q
-if ($LASTEXITCODE -ne 0) { throw "Fallo la instalacion de dependencias de Python." }
+$vpy  = Join-Path $venv "Scripts\python.exe"
+# Instala siempre con el pip del propio .venv (python -m pip), nunca con un pip global:
+# si hay varias versiones de Python instaladas, mezclarlas rompe numpy/pandas.
+function Install-Deps {
+    if (-not (Test-Path $vpy)) { & $py -m venv $venv }
+    & $vpy -m pip install --upgrade pip -q
+    & $vpy -m pip install -r (Join-Path $srv "requirements.txt") -q
+    if ($LASTEXITCODE -ne 0) { throw "Fallo la instalacion de dependencias de Python." }
+}
+function Test-Deps {
+    if (-not (Test-Path $vpy)) { return $false }
+    & $vpy -c "import numpy, pandas, fastapi, uvicorn, requests" *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+Install-Deps
+if (-not (Test-Deps)) {
+    Warn "El entorno de Python esta danado (versiones mezcladas). Recreandolo desde cero..."
+    Remove-Item -Recurse -Force $venv
+    Install-Deps
+    if (-not (Test-Deps)) { throw "Las librerias siguen sin cargar. Envia una captura de este error." }
+}
+Ok ("Python del servidor: " + (& $vpy --version))
 if (-not (Test-Path (Join-Path $srv ".env"))) {
     Copy-Item (Join-Path $srv ".env.example") (Join-Path $srv ".env")
 }
