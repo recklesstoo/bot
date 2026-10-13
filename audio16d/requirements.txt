@@ -1,0 +1,5 @@
+numpy
+scipy
+soundfile
+demucs   # separación por instrumentos (instala PyTorch; opcional con --sin-separar o --stems)
+h5py     # solo si usas --sofa
