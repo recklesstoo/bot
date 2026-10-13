@@ -50,8 +50,12 @@ TRAYECTORIAS = {
 }
 
 
+# La interfaz gráfica reemplaza esta función para mostrar los mensajes en la ventana
+SALIDA_LOG = print
+
+
 def log(msg):
-    print(f"[16D] {msg}", flush=True)
+    SALIDA_LOG(f"[16D] {msg}")
 
 
 # =======================
@@ -296,14 +300,27 @@ def cargar_mono(ruta, sr=None):
 
 
 def separar_con_demucs(ruta, carpeta, modelo):
-    log(f"Separando instrumentos con Demucs ({modelo})... puede tardar unos minutos")
-    cmd = [sys.executable, "-m", "demucs", "-n", modelo, "-o", str(carpeta), str(ruta)]
+    log(f"Separando instrumentos con Demucs ({modelo})... puede tardar varios minutos")
+    python = Path(sys.executable)
+    if python.name.lower() == "pythonw.exe":  # abierto con doble clic en Windows
+        python = python.with_name("python.exe")
+    cmd = [str(python), "-m", "demucs", "-n", modelo, "-o", str(carpeta), str(ruta)]
+    opciones = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
     try:
-        subprocess.run(cmd, check=True)
+        proceso = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, encoding="utf-8", errors="replace", **opciones)
     except FileNotFoundError:
-        sys.exit("No se encontró Python para ejecutar Demucs.")
-    except subprocess.CalledProcessError:
-        sys.exit("Demucs falló. ¿Está instalado? pip install demucs  (o usa --sin-separar)")
+        raise RuntimeError("No se encontró Python para ejecutar Demucs.")
+    ultimas = []
+    for linea in proceso.stdout:  # las barras de progreso de Demucs usan \r: llegan como líneas
+        linea = linea.strip()
+        if linea:
+            ultimas = (ultimas + [linea])[-15:]
+            if "%|" in linea:
+                log(f"Separando: {linea.split('|')[0].strip()}")
+    if proceso.wait() != 0:
+        raise RuntimeError("Demucs falló. ¿Está instalado? (pip install demucs) "
+                           "o usa la opción sin separar.\n" + "\n".join(ultimas))
     return Path(carpeta) / modelo / Path(ruta).stem
 
 
@@ -320,7 +337,74 @@ def senal_demo(sr, segundos=20):
 
 
 # =======================
-# Main
+# Proceso completo
+# =======================
+def procesar(cancion=None, salida=None, demo=False, sin_separar=False, stems=None,
+             modelo="htdemucs_6s", sofa=None, velocidad=1.0, altura=1.0, realce_elevacion=1.0,
+             cantidad_reverb=0.12, trayectorias_extra=None, ambisonics=False, normalizar=True):
+    """Hace todo el trabajo. Devuelve la ruta del archivo generado."""
+    trayectorias = dict(TRAYECTORIAS)
+    for nombre, cfg in (trayectorias_extra or {}).items():
+        trayectorias[nombre] = {**trayectorias.get(nombre, {}), **cfg}
+
+    # 1) Fuentes de sonido
+    fuentes = []  # (nombre, señal mono, trayectoria)
+    if demo:
+        sr = 44100
+        fuentes.append(("demo", senal_demo(sr), trayectorias["demo"]))
+        base = Path(salida or "demo")
+    else:
+        if not cancion and not stems:
+            raise ValueError("Indica una canción, una carpeta de stems o usa la demo")
+        base = Path(cancion or stems)
+        if sin_separar:
+            log("Cargando la canción completa")
+            mezcla, sr = cargar_mono(cancion)
+            fuentes.append(("mezcla", mezcla, trayectorias["mezcla"]))
+        else:
+            carpeta = Path(stems) if stems else separar_con_demucs(
+                cancion, Path(cancion).parent / "separado", modelo)
+            archivos = sorted(carpeta.glob("*.wav"))
+            if not archivos:
+                raise RuntimeError(f"No hay stems .wav en {carpeta}")
+            sr = sf.info(str(archivos[0])).samplerate
+            for i, archivo in enumerate(archivos):
+                senal, _ = cargar_mono(archivo, sr)
+                cfg = trayectorias.get(archivo.stem, {"tipo": "espiral", "fase": 72 * i})
+                fuentes.append((archivo.stem, senal, cfg))
+
+    # 2) HRTF
+    hrtf = HRTFSofa(sofa, sr, normalizar) if sofa else \
+        HRTFParametrica(sr, realce_elevacion, normalizar)
+
+    # 3) Render binaural de cada instrumento
+    n = max(len(s) for _, s, _ in fuentes)
+    mezcla = np.zeros((n, 2))
+    seco = np.zeros(n)
+    for nombre, senal, cfg in fuentes:
+        log(f"Moviendo '{nombre}' ({cfg.get('tipo')})")
+        mezcla[:len(senal)] += render_binaural(senal, sr, cfg, hrtf, velocidad, altura)
+        seco[:len(senal)] += senal
+    if cantidad_reverb > 0:
+        log("Añadiendo reverb")
+        mezcla += cantidad_reverb * reverb(seco, sr)
+
+    pico = np.max(np.abs(mezcla))
+    if pico > 0:
+        mezcla *= 10 ** (-1 / 20) / pico  # normaliza a -1 dBFS
+
+    salida = Path(salida) if salida else base.with_name(base.stem + "_16d.wav")
+    sf.write(str(salida), mezcla.astype(np.float32), sr, subtype="PCM_24")
+    log(f"Listo (escuchar con auriculares) -> {salida}")
+
+    if ambisonics:
+        exportar_ambisonics(fuentes, sr, salida.with_name(salida.stem + "_ambix16.wav"),
+                            velocidad, altura)
+    return salida
+
+
+# =======================
+# Main (línea de comandos)
 # =======================
 def main():
     ap = argparse.ArgumentParser(description="Separa una canción por instrumentos y la mueve en 3D (16D).")
@@ -342,65 +426,19 @@ def main():
     ap.add_argument("--sin-normalizar", action="store_true",
                     help="deja que la intensidad cambie con la dirección (por defecto constante)")
     args = ap.parse_args()
+    if not (args.demo or args.cancion or args.stems):
+        ap.error("indica una canción, --stems o --demo")
 
-    trayectorias = dict(TRAYECTORIAS)
+    extra = None
     if args.config:
         with open(args.config, encoding="utf-8") as f:
-            for nombre, cfg in json.load(f).items():
-                trayectorias[nombre] = {**trayectorias.get(nombre, {}), **cfg}
-
-    # 1) Fuentes de sonido
-    fuentes = []  # (nombre, señal mono, trayectoria)
-    if args.demo:
-        sr = 44100
-        fuentes.append(("demo", senal_demo(sr), trayectorias["demo"]))
-        base = Path("demo")
-    else:
-        if not args.cancion and not args.stems:
-            ap.error("indica una canción, --stems o --demo")
-        base = Path(args.cancion or args.stems)
-        if args.sin_separar:
-            mezcla, sr = cargar_mono(args.cancion)
-            fuentes.append(("mezcla", mezcla, trayectorias["mezcla"]))
-        else:
-            carpeta = Path(args.stems) if args.stems else separar_con_demucs(
-                args.cancion, Path(args.cancion).parent / "separado", args.modelo)
-            archivos = sorted(carpeta.glob("*.wav"))
-            if not archivos:
-                sys.exit(f"No hay stems .wav en {carpeta}")
-            sr = sf.info(str(archivos[0])).samplerate
-            for i, archivo in enumerate(archivos):
-                senal, _ = cargar_mono(archivo, sr)
-                cfg = trayectorias.get(archivo.stem, {"tipo": "espiral", "fase": 72 * i})
-                fuentes.append((archivo.stem, senal, cfg))
-
-    # 2) HRTF
-    normalizar = not args.sin_normalizar
-    hrtf = HRTFSofa(args.sofa, sr, normalizar) if args.sofa else \
-        HRTFParametrica(sr, args.realce_elevacion, normalizar)
-
-    # 3) Render binaural de cada instrumento
-    n = max(len(s) for _, s, _ in fuentes)
-    mezcla = np.zeros((n, 2))
-    seco = np.zeros(n)
-    for nombre, senal, cfg in fuentes:
-        log(f"Moviendo '{nombre}' ({cfg.get('tipo')})")
-        mezcla[:len(senal)] += render_binaural(senal, sr, cfg, hrtf, args.velocidad, args.altura)
-        seco[:len(senal)] += senal
-    if args.reverb > 0:
-        mezcla += args.reverb * reverb(seco, sr)
-
-    pico = np.max(np.abs(mezcla))
-    if pico > 0:
-        mezcla *= 10 ** (-1 / 20) / pico  # normaliza a -1 dBFS
-
-    salida = Path(args.salida) if args.salida else base.with_name(base.stem + "_16d.wav")
-    sf.write(str(salida), mezcla.astype(np.float32), sr, subtype="PCM_24")
-    log(f"Listo (escuchar con auriculares) -> {salida}")
-
-    if args.ambisonics:
-        exportar_ambisonics(fuentes, sr, salida.with_name(salida.stem + "_ambix16.wav"),
-                            args.velocidad, args.altura)
+            extra = json.load(f)
+    try:
+        procesar(args.cancion, args.salida, args.demo, args.sin_separar, args.stems, args.modelo,
+                 args.sofa, args.velocidad, args.altura, args.realce_elevacion, args.reverb,
+                 extra, args.ambisonics, not args.sin_normalizar)
+    except (RuntimeError, ValueError) as e:
+        sys.exit(str(e))
 
 
 if __name__ == "__main__":

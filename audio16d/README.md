@@ -4,7 +4,17 @@ Separa una canción por instrumentos y mueve cada uno en 3D alrededor de quien e
 izquierda/derecha y delante/detrás como el **8D**, y además **arriba y abajo**.
 La intensidad se mantiene constante en cualquier dirección. Se escucha con **auriculares**.
 
-## Instalación
+## Forma fácil (Windows, con ventana)
+
+1. Descarga la carpeta `audio16d` completa.
+2. Haz **doble clic en `INICIAR_16D.bat`**. La primera vez instala lo necesario (tarda unos minutos).
+3. Se abre la ventana: elige tu canción, cómo se mueve cada instrumento, y pulsa **Crear audio 16D**.
+
+La ventana muestra una animación de dónde está cada instrumento (vista desde arriba y de lado),
+tiene un botón para probar una demo y otro para escuchar el resultado.
+En Mac/Linux: `python interfaz16d.py`.
+
+## Instalación (línea de comandos)
 
 ```bash
 cd audio16d
