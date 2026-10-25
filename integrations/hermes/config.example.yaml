@@ -1,0 +1,8 @@
+# Copia este bloque dentro de ~/.hermes/config.yaml y ajusta command/args
+# al servidor MCP de TradingView que elijas (revisa su código antes de usarlo).
+mcp_servers:
+  tradingview:
+    command: "npx"
+    args: ["-y", "<paquete-tradingview-mcp>"]
+    env:
+      CDP_URL: "http://127.0.0.1:9222"
