@@ -12,7 +12,14 @@ CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222")
 mcp = FastMCP("tradingview")
 
 # Expresiones JS fijas (solo lectura)
-_STATE_JS = "JSON.stringify({title: document.title, url: location.href})"
+# Los selectores del DOM de TradingView pueden cambiar entre versiones (best effort).
+_STATE_JS = """JSON.stringify({
+  title: document.title,
+  url: location.href,
+  legend: (document.querySelector('[data-name="legend-source-title"]') || {}).innerText || null,
+  legend_values: (document.querySelector('[data-name="legend-series-item"]') || {}).innerText || null,
+  timeframe: (document.querySelector('#header-toolbar-intervals button[aria-checked="true"]') || {}).innerText || null
+})"""
 
 
 def _chart_target():
@@ -52,7 +59,7 @@ def get_chart_state() -> dict:
     m = re.match(r"\s*([^\s]+)\s+([\d.,]+)", state["title"])
     if m:
         state["symbol"], state["price"] = m.group(1), m.group(2)
-    return state
+    return state  # si legend es null, usa screenshot()
 
 
 @mcp.tool()
