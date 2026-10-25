@@ -3,7 +3,7 @@
 Herramientas fijas: no hay evaluación arbitraria de JS ni clics, así que no
 puede operar el broker. Requiere TradingView lanzado con --remote-debugging-port.
 """
-import base64, json, os, subprocess, time, urllib.request
+import base64, json, os, subprocess, threading, time, urllib.request
 
 from mcp.server.fastmcp import FastMCP, Image
 from websockets.sync.client import connect
@@ -68,6 +68,13 @@ def _cdp(method, params=None):
                 return msg["result"]
 
 
+def _try(fn):
+    try:
+        fn()
+    except Exception:
+        pass
+
+
 @mcp.tool()
 def open_tradingview() -> str:
     """Abre TradingView Desktop con el puerto de depuración si no está abierto."""
@@ -98,4 +105,7 @@ def screenshot() -> Image:
 
 
 if __name__ == "__main__":
+    # Abre TradingView al arrancar Hermes, sin bloquear el handshake MCP.
+    if os.getenv("TV_AUTOLAUNCH", "1") == "1":
+        threading.Thread(target=lambda: _try(_ensure_running), daemon=True).start()
     mcp.run()
