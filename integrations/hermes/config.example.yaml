@@ -1,8 +1,8 @@
-# Copia este bloque dentro de ~/.hermes/config.yaml y ajusta command/args
-# al servidor MCP de TradingView que elijas (revisa su código antes de usarlo).
+# Añade este bloque a ~/.hermes/config.yaml (si ya existe mcp_servers, solo añade la entrada tradingview).
+# Ajusta la ruta a tu venv y al repo.
 mcp_servers:
   tradingview:
-    command: "npx"
-    args: ["-y", "<paquete-tradingview-mcp>"]
+    command: "/home/jdm/bot/integrations/hermes/.venv/bin/python"
+    args: ["/home/jdm/bot/integrations/hermes/tv_mcp.py"]
     env:
       CDP_URL: "http://127.0.0.1:9222"
