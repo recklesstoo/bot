@@ -3,7 +3,7 @@
 Herramientas fijas: no hay evaluación arbitraria de JS ni clics, así que no
 puede operar el broker. Requiere TradingView lanzado con --remote-debugging-port.
 """
-import base64, json, os, re, urllib.request
+import base64, json, os, urllib.request
 
 from mcp.server.fastmcp import FastMCP, Image
 from websockets.sync.client import connect
@@ -16,9 +16,8 @@ mcp = FastMCP("tradingview")
 _STATE_JS = """JSON.stringify({
   title: document.title,
   url: location.href,
-  legend: (document.querySelector('[data-name="legend-source-title"]') || {}).innerText || null,
-  legend_values: (document.querySelector('[data-name="legend-series-item"]') || {}).innerText || null,
-  timeframe: (document.querySelector('#header-toolbar-intervals button[aria-checked="true"]') || {}).innerText || null
+  symbol: (document.querySelector('#header-toolbar-symbol-search') || {}).innerText || null,
+  timeframe: (document.querySelector('[id*="header-toolbar-intervals"] button') || {}).innerText || null
 })"""
 
 
@@ -53,13 +52,10 @@ def list_tabs() -> list[dict]:
 
 @mcp.tool()
 def get_chart_state() -> dict:
-    """Título y URL del gráfico activo (el título suele incluir símbolo y precio)."""
+    """Símbolo y timeframe del gráfico activo. Para ver el precio usa screenshot()."""
     res = _cdp("Runtime.evaluate", {"expression": _STATE_JS, "returnByValue": True})
     state = json.loads(res["result"]["value"])
-    m = re.match(r"\s*([^\s]+)\s+([\d.,]+)", state["title"])
-    if m:
-        state["symbol"], state["price"] = m.group(1), m.group(2)
-    return state  # si legend es null, usa screenshot()
+    return state
 
 
 @mcp.tool()
