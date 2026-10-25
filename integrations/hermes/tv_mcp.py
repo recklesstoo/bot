@@ -3,7 +3,7 @@
 Herramientas fijas: no hay evaluación arbitraria de JS ni clics, así que no
 puede operar el broker. Requiere TradingView lanzado con --remote-debugging-port.
 """
-import base64, json, os, urllib.request
+import base64, json, os, subprocess, time, urllib.request
 
 from mcp.server.fastmcp import FastMCP, Image
 from websockets.sync.client import connect
@@ -21,7 +21,33 @@ _STATE_JS = """JSON.stringify({
 })"""
 
 
+LAUNCH_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch_tradingview.sh")
+
+
+def _cdp_up():
+    try:
+        urllib.request.urlopen(f"{CDP_URL}/json/version", timeout=2).close()
+        return True
+    except OSError:
+        return False
+
+
+def _ensure_running():
+    """Si TradingView no responde en el puerto CDP, lo abre con launch_tradingview.sh."""
+    if _cdp_up():
+        return "TradingView ya estaba abierto"
+    subprocess.Popen(["bash", LAUNCH_SCRIPT], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(45):
+        time.sleep(1)
+        if _cdp_up():
+            time.sleep(8)  # deja que cargue el gráfico
+            return "TradingView abierto"
+    raise RuntimeError("No pude abrir TradingView; revisa launch_tradingview.sh")
+
+
 def _chart_target():
+    _ensure_running()
     with urllib.request.urlopen(f"{CDP_URL}/json/list", timeout=5) as r:
         targets = json.load(r)
     for t in targets:
@@ -40,6 +66,12 @@ def _cdp(method, params=None):
                 if "error" in msg:
                     raise RuntimeError(msg["error"])
                 return msg["result"]
+
+
+@mcp.tool()
+def open_tradingview() -> str:
+    """Abre TradingView Desktop con el puerto de depuración si no está abierto."""
+    return _ensure_running()
 
 
 @mcp.tool()
