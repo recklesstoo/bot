@@ -41,8 +41,11 @@ Para cada punto: qué necesitaba, qué tuve que hacer por fuera y qué debería 
   `this connection is read-only; use the TraderOS app for that`, y no hay herramienta para crear una
   estrategia. `backtest_run` y `run_pine_script` piden aprobación en la app. Terminé usando un motor
   propio en Python y un exportador a NinjaScript y Pine.
-- **Debería ofrecer:** crear y backtestear una estrategia desde el cliente (con aprobación del
-  usuario), o al menos importar un Pine o una especificación y devolver el `run_id`.
+- **Podría ofrecer, si la seguridad lo permite:** crear y backtestear una estrategia desde el cliente
+  con aprobación del usuario en la app, o importar un Pine y devolver el `run_id`. Entiendo que el modo
+  de solo lectura puede ser una decisión de seguridad deliberada (las respuestas incluyen texto externo,
+  como nombres de eventos del calendario, que podría traer instrucciones). Lo que sí pido en cualquier
+  caso es que el rechazo explique el motivo y qué nivel de permiso haría falta.
 
 ### G5. Exportar datos y trabajar con ellos dentro de la plataforma
 - **Necesitaba:** analizar unas 3.000 velas de 5 minutos por año (fallos de ruptura, volumen).
