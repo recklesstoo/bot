@@ -157,3 +157,100 @@ no disponible y de nuevo disponible durante la sesión. Puede ser del cliente o 
 ## Lo que funcionó bien
 `evaluate_edge` coincidió con mi cálculo, `strategy_results_read` y `quant_validate_*` respondieron en
 100 a 350 ms, hay datos de ES y NQ desde 2016, y los avisos de honestidad de datos son claros.
+
+## Parte 3. Por qué importa cada mejora (la razón de trading)
+
+Criterio para ordenarlas: **qué decisión con dinero cambia** si no se arregla. Primero lo que lleva a
+operar algo sin ventaja, después lo que frena el trabajo, al final el ruido.
+
+### Prioridad 1: llevan a operar algo que no tiene ventaja
+
+**G2 y F5: validación con periodo reservado y un solo veredicto honesto.**
+Con N ideas probadas, el mejor resultado esperado por puro azar crece con N. Con unas 47 ideas
+independientes, un t entre 2 y 3 es lo normal por suerte, y mis 10 "mejores" tenían t de 1,7 a 3,1 en
+los años de selección y -0,033 R en el año reservado. El costo de un falso positivo es capital real. Solo
+la plataforma ve todas las pruebas de un usuario (cada edición de especificación y cada ronda del lazo
+de mejora), así que solo ella puede corregirlo bien. Hoy `trials` vale 1 aunque la estrategia va por la
+versión 3. Subestimar las pruebas infla la confianza. Por eso hace falta un único veredicto con la base de
+cada número: en un caso hay 46%, 76,58% y "robust" a la vez, y el Sharpe aparece como 0,2983 y 0,0359.
+Quien dimensiona capital lee un solo número; si hay tres, se queda con el más cómodo.
+
+**F4: el walk-forward debe incluir los años malos y pesar el pliegue más reciente.**
+La pregunta del walk-forward es "¿habría funcionado esta regla a medida que cambiaba el mercado?". La
+respuesta más informativa está en los periodos hostiles. Aquí el año 2022 (-549,7 en 70 operaciones)
+queda fuera, y el pliegue de mayo a octubre de 2026 (el más cercano a operar hoy) es el único "overfit".
+Además, con unas 30 operaciones por pliegue el error estándar de un Sharpe por operación ronda 0,18, mayor
+que las diferencias entre pliegues (0,05 frente a 0,19). Clasificar "robust" u "overfit" sin intervalo de
+confianza es leer ruido.
+
+**F6: muestra pequeña con confianza alta, y señales que desaparecen.**
+Con 9 operaciones, ganar 6 ocurre por azar el 25% de las veces con una moneda justa, y "63% de confianza"
+junto a "INSUFFICIENT SAMPLE" ancla al usuario en lo equivocado. Más grave: el estudio de eventos tenía
+unas 149 señales y el motor operó 9. El usuario creerá que las estadísticas de las 149 describen un sistema
+que ejecuta el 6%. Hay que decir por qué se descartaron (una posición a la vez, límite de sesión, filtro de
+riesgo). La operación con -1,9 R y un stop de 0,95 R afecta a la expectativa: o hubo un hueco real que el
+usuario debe ver, o el modelo de relleno del stop está mal.
+
+**F11: el contrato continuo contamina el volumen y crea huecos falsos.**
+El volumen de ES migra al siguiente trimestre unos ocho días antes del vencimiento. Una serie que sigue
+al contrato que vence muestra "días de poco volumen" que no lo son, y contamina todo lo basado en volumen
+relativo (`volume_pace`, `rvol_bucket`). Además, sin ajuste de contrato, la mañana del cambio muestra un
+hueco del orden del diferencial entre contratos (alrededor del 0,5% del precio) que no ocurrió en el
+mercado. Eso falsea el filtro `gap_size` y cualquier ruptura de rango. Un trader que filtra por hueco o
+volumen estaría operando artefactos de datos.
+
+**F3: regímenes "mean-reverting" a partir de 9 días.**
+Varianza, autocorrelación y vida media necesitan cientos de observaciones independientes. Con 2.500 velas
+solapadas de unas 9 sesiones, la estimación la domina el patrón horario (apertura y cierre) y el salto
+nocturno. Una vida media de 934 velas son 3,4 días, no algo que se opere en intradía. Aun así la sugerencia
+es "probar una entrada de reversión". Una etiqueta que invita a un trade sin respaldo estadístico es
+peor que no tener la herramienta.
+
+### Prioridad 2: frenan la investigación y hacen que se trabaje fuera
+
+**G1: buscar disparadores, no solo filtros.** El edge de un trader está en la pareja evento más lugar
+("fallo de una ruptura de la banda de VWAP", "retroceso al FVG"), no en apilar filtros sobre una
+entrada mediocre. Un filtro solo quita operaciones: no descubre que otro disparador era mejor. Además,
+cada filtro reduce la muestra y recorta las pocas operaciones grandes que concentran el beneficio, como
+discutimos con el 33% de aciertos. Un lazo de mejora que solo filtra puede empeorar una estrategia.
+
+**G3: las condiciones que usa un trader intradía.** VWAP y sus desviaciones son la referencia institucional
+y actúan como imán de reversión. El volumen que importa es el de la vela del disparador frente a lo
+normal de esa hora, porque una ruptura sin participación suele fallar. El volumen del día completo no se
+conoce a las 09:35, así que usarlo sería mirar al futuro, y el nombre `rvol_prior` no aclara si es del día
+anterior. Las ventanas de 90 minutos mezclan la subasta de apertura (primeros 30 minutos) con lo que
+ocurre después; los edges intradía suelen vivir en ventanas de 15 a 30 minutos.
+
+**G4: ejecutar la idea dentro de la plataforma.** Si la investigación se hace fuera, los costos, los
+rellenos y las sesiones son distintos a los del motor real (mi motor entra a la apertura siguiente sin
+deslizamiento; el motor de TraderOS aplica su propia regla de recorrido de la vela). Los resultados no se
+pueden comparar. Y las pruebas hechas fuera no entran en el recuento de `trials`, con lo que se rompe la
+propia protección contra el sobreajuste.
+
+**G5: cómputo junto a los datos.** Ninguna plataforma puede anticipar cada estudio ("tasa de fallo de
+ruptura por volumen relativo"). Si el usuario se lleva los datos, pierde las reglas de contrato, de sesión
+y de fuente de volumen, y el resultado deja de ser reproducible dentro del producto.
+
+**F14: sesión y zona horaria.** La lógica de futuros de EE. UU. es en hora local (apertura 09:30 ET). Un
+filtro en UTC cambia de hora dos veces al año, y durante unas tres semanas Europa y EE. UU. cambian en
+fechas distintas. Un filtro equivocado en silencio estropea justo los estudios de la primera hora, que son
+los más comunes.
+
+### Prioridad 3: confianza, costo y ruido
+
+**F1 y F2: errores sin causa.** Un escaneo de mercados falla siempre y dice solo "api/v1: .". Quien depura
+no puede separar un fallo de datos de uno de red, y el usuario no sabe si reintentar.
+
+**F7: clasificación de la estrategia.** El "DNA" alimenta la diversificación y el ajuste al régimen. Llamar
+"tendencia" a una reversión engaña sobre su correlación con otras estrategias y sobre cuándo apagarla:
+las reversiones pierden en días de tendencia.
+
+**F13: riesgo por operación muy desigual.** Con 1 contrato fijo y un stop distinto en cada operación, el
+riesgo por trade va de 6,89 a 260 USD. El resultado en dólares lo mandan pocas operaciones de stop ancho,
+y la expectativa en R (0,07) y en dólares (3,43 por operación) cuentan historias distintas. Conviene
+mostrar un modo de riesgo fijo por operación como comparación por defecto.
+
+**F8, F9, F10, F12, F15: tamaño y claridad de las respuestas.** Las respuestas repetidas cuestan tokens y
+cabida de contexto, y un resultado truncado o con la historia mal etiquetada puede llevar a descartar un
+estudio válido o a creer en uno corto (MES aparece con dos semanas de historia y tiene siete años). Pegar
+178 cifras a mano en `evaluate_edge` también arriesga un error de transcripción que cambia el veredicto.
