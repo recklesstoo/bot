@@ -1,0 +1,142 @@
+//@version=6
+// The 10 best ideas of ideas/top_ideas.py as one Pine v6 strategy (port of ideas/idea_engine.py).
+// 5-minute chart, first 90 minutes of the New York session (09:30-11:00), one trade per day.
+// Entry at the open of the bar after the signal, flat at 11:00.
+//
+// Preset  zone       trigger          stop  target  window  trend
+//   1     vwap_band  fade             atr   2R      late    against   (idea 10335)
+//   2     vwap_band  fade             atr   time    late    against   (idea 10362)
+//   3     vwap_band  fade             atr   time    late    none      (idea 10360)
+//   4     vwap_band  fade             atr   1R      late    against   (idea 10308)
+//   5     vwap_band  fade             atr   2R      late    none      (idea 10333)
+//   6     vwap_band  fade             bar   time    late    none      (idea 10279)
+//   7     vwap_band  fade             bar   2R      late    none      (idea 10252)
+//   8     ema9       close_break      atr   time    late    none      (idea 11494)
+//   9     vwap_band  fade             bar   2R      late    against   (idea 10254)
+//  10     vwap_band  fade             atr   1R      late    none      (idea 10306)
+// Preset 0 uses the individual inputs.
+//
+// Differences from the Python engine: stop and target distances are fixed when the entry order is
+// placed. For the ATR stop that is exact. For the signal-bar stop the distance uses the signal bar
+// close as the expected entry price instead of the next open.
+strategy("IdeaTop10", overlay = true, initial_capital = 100000, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5,
+     slippage = 1, calc_on_every_tick = false)
+
+preset  = input.int(1, "Preset (0 = use the inputs below)", minval = 0, maxval = 10)
+tz      = input.string("America/New_York", "Exchange time zone")
+zoneIn  = input.string("vwap_band", "Zone", options = ["vwap_band", "ema9"])
+trigIn  = input.string("fade", "Trigger", options = ["fade", "close_break"])
+stopIn  = input.string("atr", "Stop", options = ["atr", "bar"])
+tgtIn   = input.string("2R", "Target", options = ["1R", "2R", "time"])
+winIn   = input.string("late", "Window", options = ["any", "early", "late"])
+trendIn = input.string("against", "Trend filter vs VWAP", options = ["none", "with", "against"])
+
+zoneK  = preset >= 1 ? (preset == 8 ? "ema9" : "vwap_band") : zoneIn
+trigK  = preset >= 1 ? (preset == 8 ? "close_break" : "fade") : trigIn
+winK   = preset >= 1 ? "late" : winIn
+stopK  = preset >= 1 ? ((preset == 6 or preset == 7 or preset == 9) ? "bar" : "atr") : stopIn
+tgtK   = preset >= 1 ? ((preset == 1 or preset == 5 or preset == 7 or preset == 9) ? "2R" : ((preset == 4 or preset == 10) ? "1R" : "time")) : tgtIn
+trendK = preset >= 1 ? ((preset == 1 or preset == 2 or preset == 4 or preset == 9) ? "against" : "none") : trendIn
+
+// Bar index inside the session: bar 0 starts 09:30 New York.
+n = int((hour(time, tz) * 60 + minute(time, tz) - 570) / 5)
+okTf = timeframe.in_seconds() == 300
+inSess = okTf and n >= 0 and n <= 17
+
+var float cumV = 0.0
+var float cumTPV = 0.0
+var float cumTP2V = 0.0
+var float emaV = na
+var bool tradedToday = false
+var bool brokeUp = false
+var bool brokeDown = false
+
+if inSess and n == 0
+    cumV := 0.0
+    cumTPV := 0.0
+    cumTP2V := 0.0
+    tradedToday := false
+    brokeUp := false
+    brokeDown := false
+
+tp = (high + low + close) / 3.0
+if inSess
+    cumV += volume
+    cumTPV += tp * volume
+    cumTP2V += tp * tp * volume
+    emaV := n == 0 ? close : 0.2 * close + 0.8 * emaV
+
+vw = cumV > 0 ? cumTPV / cumV : close
+sig = cumV > 0 ? math.sqrt(math.max(cumTP2V / cumV - vw * vw, 0.0)) : 0.0
+rng = high - low
+
+// Levels known at the close of the previous bar.
+float upperL = na
+float lowerL = na
+if inSess
+    if zoneK == "vwap_band" and n >= 1
+        upperL := vw[1] + sig[1]
+        lowerL := vw[1] - sig[1]
+    else if zoneK == "ema9" and n >= 3
+        upperL := emaV[1]
+        lowerL := emaV[1]
+
+valid = not na(upperL)
+breakUp = valid and close > upperL and close[1] <= upperL
+breakDn = valid and close < lowerL and close[1] >= lowerL
+
+bool sigShort = false
+bool sigLong = false
+if inSess and valid
+    if trigK == "fade"
+        if breakUp
+            brokeUp := true
+        else if brokeUp and close <= upperL
+            sigShort := true
+            brokeUp := false
+        if breakDn
+            brokeDown := true
+        else if brokeDown and close >= lowerL
+            sigLong := true
+            brokeDown := false
+    else
+        sigLong := breakUp
+        sigShort := breakDn
+
+inWindow = winK == "early" ? n <= 5 : (winK == "late" ? (n >= 6 and n <= 11) : n <= 11)
+above = close >= vw
+trendOkLong = trendK == "none" or (trendK == "with" ? above : not above)
+trendOkShort = trendK == "none" or (trendK == "with" ? not above : above)
+
+// ATR = mean range of the previous 10 session bars (fewer at the start).
+float atrSum = 0.0
+int atrCnt = inSess ? math.min(n, 10) : 0
+if atrCnt > 0
+    for i = 1 to atrCnt
+        atrSum += rng[i]
+atr = atrCnt > 0 ? atrSum / atrCnt : 0.0
+
+mult = tgtK == "1R" ? 1.0 : (tgtK == "2R" ? 2.0 : 0.0)
+tickSz = syminfo.mintick
+
+if inSess and not tradedToday and inWindow and n >= 1 and n <= 11 and atr > 0 and strategy.position_size == 0
+    float distLong = stopK == "atr" ? atr : math.max(close - (low - tickSz), 0.5 * atr)
+    float distShort = stopK == "atr" ? atr : math.max((high + tickSz) - close, 0.5 * atr)
+    if sigShort and trendOkShort
+        strategy.entry("S", strategy.short)
+        strategy.exit("xS", "S", loss = distShort / tickSz, profit = mult > 0 ? mult * distShort / tickSz : na)
+        tradedToday := true
+    else if sigLong and trendOkLong
+        strategy.entry("L", strategy.long)
+        strategy.exit("xL", "L", loss = distLong / tickSz, profit = mult > 0 ? mult * distLong / tickSz : na)
+        tradedToday := true
+
+// Flat at 11:00 New York (the 10:55 bar closes then).
+if inSess and n == 17 and strategy.position_size != 0
+    strategy.close_all("time")
+
+plot(inSess ? vw : na, "VWAP", color = color.orange)
+plot(inSess and zoneK == "vwap_band" ? vw + sig : na, "VWAP +1s", color = color.gray)
+plot(inSess and zoneK == "vwap_band" ? vw - sig : na, "VWAP -1s", color = color.gray)
