@@ -28,3 +28,20 @@ Rank correlation of mean R between periods across ideas: +0.01 in both direction
 ## Limits
 Only the first 90 minutes of the session. 460 of the 2,000 ideas never trade in 2026. ES and NQ
 results on the same days are strongly correlated, so pooled t-statistics are optimistic.
+
+## All 14,580 combinations, top 10 with a held-out year
+`python top_ideas.py --data-dir DIR --out OUT` (about 20 seconds). Selection on 2025 and 2026
+(ES and NQ pooled, net R per trade); ranking by the lower of the two years' t-statistics among
+4,332 ideas with >= 40 trades in each year. 2024 is not used for selection.
+
+| Result | Value |
+|---|---|
+| Ideas positive in both selection years | 594 of 4,332 |
+| Top 10 in 2025 / 2026 | mean R +0.11 to +0.29, t +1.7 to +3.1 |
+| Top 10 on 2024 | mean R -0.033, 3 of 10 positive, best t +0.4 |
+| All eligible ideas on 2024 | mean R -0.006, 48% positive |
+| Distinct (zone, trigger) pairs in the top 10 | 2 (VWAP band / failed-break fade; EMA9 / close break) |
+| Effective independent ideas in a 2,000-idea sample | 47 |
+
+Pooled ES and NQ sessions overlap in time, so the t-statistics are optimistic.
+Full top 10 in `top10.csv`.
