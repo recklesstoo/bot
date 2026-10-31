@@ -1,126 +1,159 @@
-# TraderOS: fallos y mejoras encontrados al usarlo por MCP
+# TraderOS: qué debería hacer la plataforma sola, y fallos encontrados al usarla
 
-Contexto general: sesión de investigación con las herramientas MCP de TraderOS (`query_data`,
-`market_ohlcv`, `market_orb_study`, `market_coverage`, `list_strategies`). Objetivo: medir si ideas
-intradía sobre el rango de apertura (ES y NQ, velas de 5 minutos, 09:30-11:00 Nueva York, 2024-2026)
-tenían ventaja, con un año reservado para validar. Cada punto dice qué se estaba haciendo, qué falló
-y qué se propone. Lo marcado "no probado" se deduce de la descripción de la herramienta.
+Contexto: sesión de investigación por MCP. Objetivo: encontrar estrategias intradía con ventaja en ES y
+NQ (rango de apertura, VWAP, FVG), validarlas con un año reservado y llevarlas a TraderOS. Dos partes:
+(1) lo que tuve que hacer FUERA de la plataforma y debería hacer ella; (2) fallos e inconsistencias
+encontrados al usar sus herramientas de punta a punta, con evidencia. Lo marcado "no probado" se
+deduce de la descripción de la herramienta.
 
-## A. Fallos
+## Parte 1. Lo que la plataforma debería hacer sola
 
-### A1. `query_data` repite las filas en la respuesta
-- **Qué hacía:** bajar las velas de 5 minutos de ES y NQ, mes por mes (unas 380 filas por consulta,
-  sin LIMIT), para analizarlas fuera. En total, 16 consultas por año de datos.
-- **Qué falló:** una consulta de 396 filas devolvió 95.163 caracteres. Las 396 filas aparecen en
-  `artifacts[0].payload.rows` y otra vez en `frames[].payload.rows`, además de 50 en `data.rows`. Solo
-  las filas son unos 47.000 caracteres. La respuesta superó el límite del cliente y quedó guardada en
-  un archivo. Con LIMIT 50 y paginación (17 llamadas), cada página también traía las filas repetidas,
-  así que el contexto se llenaba sin necesidad. Un cliente sin copia a archivo perdería los datos.
-- **Propuesta:** devolver las filas una sola vez (o una referencia al artefacto) y no copiarlas en
-  `frames`. Opción `return=inline|file`.
+Para cada punto: qué necesitaba, qué tuve que hacer por fuera y qué debería ofrecer TraderOS.
 
-### A2. `market_ohlcv` no devuelve la ventana que describe
-- **Qué hacía:** pedir 120 días de velas de 5 minutos de ES para estudiar el volumen.
-- **Qué falló:** el resumen dice `bars = 23568` pero `recent_bars` trae 10. La descripción promete
-  "raw bars" y no hay forma de paginar el resto, así que la herramienta no sirve para obtener datos.
-- **Propuesta:** devolver todas las filas (paginadas o en archivo) o renombrar la herramienta y
-  aclarar que solo da un resumen.
+### G1. Generar y probar muchas ideas, no solo filtros sobre un backtest terminado
+- **Necesitaba:** probar miles de combinaciones de zona, disparador, stop, objetivo y filtros.
+- **Hice por fuera:** un generador de 14.580 combinaciones y un motor de señales en Python. Midió todas
+  en 20 segundos sobre 3 años de ES y NQ. El lazo de mejora de TraderOS (`strategy_filter_catalog`, 61
+  filtros) solo prueba filtros sobre una estrategia ya backtesteada.
+- **Debería ofrecer:** una búsqueda de ideas (disparadores x zonas x salidas) con las mismas garantías
+  de validación que el resto de la plataforma.
 
-### A3. El volumen del futuro continuo se distorsiona en las semanas de vencimiento
-- **Qué hacía:** calcular el volumen relativo de la vela de ruptura (su volumen frente a la media de
-  la misma hora en los 20 días anteriores) en ES.
-- **Qué falló:** el volumen de 09:30 a 11:00 cae a menos de la mitad de la mediana (362.602) justo
-  antes de cada vencimiento trimestral: 17 a 19 de marzo, 15 a 19 de junio y 14 y 15 de septiembre de
-  2026. La serie parece seguir el contrato que vence cuando el volumen ya pasó al siguiente. Hubo que
-  excluir esos días a mano con un filtro de "volumen del día < 50% de la mediana". También aparecen
-  los festivos (25 de mayo, 3 de julio, 7 de septiembre).
-- **Propuesta:** cambiar de contrato por volumen o por interés abierto, y devolver una columna
-  `contract` o `roll_week`. Documentar la regla junto a `contract_stitching`.
+### G2. Validación con periodo reservado y corrección por pruebas múltiples, por defecto
+- **Necesitaba:** saber si el "mejor" de miles de candidatos era real.
+- **Hice por fuera:** elegí las 10 mejores con 2025 y 2026 y las medí en 2024. Promediaron -0,033 R y
+  solo 3 de 10 fueron positivas. Sin el año reservado, parecían buenas (t de 1,7 a 3,1 en los años de
+  selección).
+- **Debería ofrecer:** que todo barrido reserve un periodo que no se use para elegir y reporte el
+  número de pruebas independientes. Mis 2.000 ideas equivalían a unas 47 independientes (matriz de
+  correlación de resultados diarios); ese número alimenta `trials` en `quant_validate_deflated_sharpe`.
 
-### A4. `market_coverage`: `history_start` contradice la profundidad real
-- **Qué hacía:** comprobar cuánto historial tenía MES antes de usarlo.
-- **Qué falló:** `readiness` dice `history_start: 2026-10-17` (dos semanas) y `bar_depth.MES.1m.earliest`
-  dice `2019-05-05`. La nota lo explica, pero el nombre del campo lleva a una conclusión equivocada.
-  La llamada tardó unos 29 segundos y la comprobación de cadenas de opciones salió "unverified".
-- **Propuesta:** llamar `history_start` a lo que es la primera barra guardada, o quitarlo del bloque de
-  readiness.
+### G3. Cobertura de condiciones que mis mejores ideas necesitaban
+- **Necesitaba:** banda de VWAP ±1 sigma, volumen relativo de la vela de la señal, ventanas de 30
+  minutos (10:00-10:30), retesteo de FVG.
+- **Qué hay:** `strategy_filter_catalog` ofrece 11 ventanas horarias fijas de 90 minutos, `volume_pace`
+  mide el volumen relativo de la sesión (`rvol_prior`), y `price_vs_vwap` solo dice a favor o en contra
+  de VWAP. No hay bandas de VWAP, FVG ni volumen por vela.
+- **Debería ofrecer:** ventanas horarias libres, bandas de VWAP en sigmas y volumen relativo por vela.
 
-### A5. Texto de relleno que no aplica a futuros
-- **Qué hacía:** las mismas consultas de ES.
-- **Qué falló:** cada respuesta incluye unos 1.900 caracteres (`volume_scope`, `ranking_basis`,
-  `intraday_history`, `paging`), con un aviso sobre "Databento US equities feed, EQUS.MINI" aunque su
-  propio campo `applies_to` dice que es para acciones. En 17 páginas son más de 30.000 caracteres sin
-  información.
-- **Propuesta:** omitir esos campos cuando no aplican o enviarlos una sola vez.
+### G4. Ejecutar una idea nueva sin salir de la plataforma
+- **Necesitaba:** correr en TraderOS la estrategia que construimos.
+- **Qué pasó:** la conexión MCP es de solo lectura. `strategy_find(resume=true)` devolvió
+  `this connection is read-only; use the TraderOS app for that`, y no hay herramienta para crear una
+  estrategia. `backtest_run` y `run_pine_script` piden aprobación en la app. Terminé usando un motor
+  propio en Python y un exportador a NinjaScript y Pine.
+- **Debería ofrecer:** crear y backtestear una estrategia desde el cliente (con aprobación del
+  usuario), o al menos importar un Pine o una especificación y devolver el `run_id`.
 
-### A6. `market_orb_study` no define sus campos y no responde "cuándo"
-- **Qué hacía:** el usuario preguntó "cuándo ocurre el breakout". Corrí el estudio en ES y NQ, rango de
-  5 minutos, 250 días.
-- **Qué falló:** devolvió 84.417 y 86.051 caracteres por el registro día a día y quedó guardado en un
-  archivo. No trae la hora de la ruptura. `win_rate` (0,497) no está definido. No se explica qué es
-  `held` ni qué dirección tiene un día con ruptura doble (en ES, 135 de 179 días). Hubo que calcular a
-  mano el resumen a partir de `by_day`.
-- **Propuesta:** añadir la hora de la primera ruptura, un modo `summary_only` y un apartado en la
-  descripción que defina `held`, `double_break`, `win_rate`, el criterio por defecto (`by-wick`) y la
-  zona horaria.
+### G5. Exportar datos y trabajar con ellos dentro de la plataforma
+- **Necesitaba:** analizar unas 3.000 velas de 5 minutos por año (fallos de ruptura, volumen).
+- **Qué pasó:** `run_code` no tiene acceso a los datos de TraderOS y `input_data` admite 2 MB. `query_data`
+  no tiene funciones de ventana y su tope es de 500 filas. Tuve que bajar todo y analizarlo fuera.
+- **Debería ofrecer:** que `run_code` monte las velas pedidas (ticker, rango, sesión), o exportación a
+  CSV de cualquier consulta.
 
-### A7. Desconexiones intermitentes del servidor
-- **Qué hacía:** toda la sesión.
-- **Qué falló:** la lista de herramientas de `traderos` se marcó varias veces como no disponible y
-  disponible de nuevo, y hubo que volver a cargar los esquemas. Puede ser del cliente o del proxy; no
-  tengo forma de saber si fue el servidor.
-- **Propuesta:** registrar en el servidor las caídas de sesión MCP, para poder cruzarlas con este reporte.
+## Parte 2. Fallos e inconsistencias, con evidencia
 
-## B. Mejoras
+### Probando las herramientas de investigación y validación
 
-### B1. Que `run_code` pueda leer los datos de TraderOS
-- **Qué hacía:** calcular fallos de ruptura y resultados por tramos de volumen sobre 3.000 velas por año.
-- **Qué falló:** el entorno de `run_code` no tiene acceso a los datos y `input_data` admite 2 MB. Para
-  usarlo habría tenido que retranscribir miles de filas. Trabajé fuera de TraderOS, y solo fue posible
-  porque mi cliente guarda las respuestas grandes en archivos.
-- **Propuesta:** un argumento `data` (ticker, timeframe, rango, sesión) que monte las velas como archivo
-  dentro de `run_code`, o una herramienta de exportación a CSV o parquet.
+**F1. `quant_discovery_scan` falla siempre y no dice por qué**
+- Lo llamé dos veces (por defecto y con `tickers=[ES,NQ], limit=5`). Ambas devolvieron:
+  `Could not reach TraderOS API at https://api.traderos.ai/api/v1: .` (la causa va vacía).
+- Propuesta: mensaje con la causa real (tiempo de espera, 5xx, límite) y reintento. Todo el resto de
+  llamadas del día funcionó.
 
-### B2. Consultas con sesión y zona horaria
-- **Qué hacía:** seleccionar 09:30-11:00 de Nueva York con `query_data`.
-- **Qué falló:** la tabla está en UTC, así que filtré 13:30-14:55 UTC. Eso solo vale con horario de
-  verano. Tuve que limitar todo a marzo-octubre y descartar unos cuatro meses de cada año. En invierno
-  el mismo filtro habría seleccionado en silencio 08:30-09:55.
-- **Propuesta:** un parámetro `session` (`RTH`, `ETH` o rango horario en la zona del mercado) que
-  gestione el cambio de hora.
+**F2. Errores de rechazo contradictorios**
+- `strategy_find(resume=true)` devolvió `retry_same_tool: false`, `available_tools: []`,
+  `what_exists_instead: []` y a la vez `next: "Retry once with a narrower request (one ticker, a
+  shorter date range)"`. Ese consejo no tiene sentido para un rechazo de solo lectura.
+- Propuesta: un mensaje específico ("esta conexión no puede cambiar la estrategia activa") y que la
+  descripción de `strategy_find` avise de que `resume` necesita escritura.
 
-### B3. SQL más completo
-- **Qué hacía:** querer detectar "primera vela que cierra fuera del rango y siguiente que vuelve dentro"
-  directamente en SQL para no mover las velas.
-- **Qué falló:** no hay funciones de ventana ni uniones consigo misma, y el tope de 500 filas con 5 s de
-  tiempo obligó a bajar los datos.
-- **Propuesta:** `lag`, `lead`, `row_number` y más filas con salida a archivo.
+**F3. `quant_scan_inefficiency` saca conclusiones de unos 9 días**
+- ES y NQ en 5 minutos usaron `bars_used: 2500`, es decir, unas 9 sesiones (con horario extendido). La
+  vida media sale en 444 y 934 velas (1,6 y 3,4 días), más larga que un tercio de la muestra, y no hay
+  intervalo de confianza. NQ queda como "mean-reverting" (varianza 0,939) y la sugerencia siguiente es
+  "probar una entrada de reversión dimensionada a la vida media", 934 velas en un gráfico de 5 minutos.
+- El `inefficiency_score` es 0,8088 para ES, que sale "noisy / mixed", y 0,7886 para NQ, que sale
+  "mean-reverting". El score no está definido y parece al revés.
+- Los metadatos del artefacto marcan `gaps: no question or hypothesis recorded, limitations missing`.
+- Propuesta: usar una ventana mínima configurable (semanas), dar intervalo de confianza o p-valor y
+  documentar el score.
 
-### B4. Crear y seleccionar estrategias desde MCP
-- **Qué hacía:** llevar a TraderOS las estrategias de la sesión. Con `list_strategies` vi las 10 que ya
-  tiene el usuario y quise probar la nueva con `backtest_run`.
-- **Qué falló (no probado, por la descripción):** `backtest_run` corre "la estrategia activa de esta
-  conversación" y pide un `session_id`, pero ninguna herramienta MCP crea o selecciona una sesión.
-  `list_strategies` devuelve `strategy_id`, `saved_strategy_id` y `lineage_id`, y no dice cuál espera
-  `backtest_run`.
-- **Propuesta:** exponer `strategy_create` y una herramienta de selección de sesión, y documentar qué id
-  espera cada herramienta.
+**F4. Walk-forward que excluye la mitad de la historia y esconde el último pliegue**
+- Estrategia "NY open VWAP momentum continuation", 394 operaciones, backtest 2021-01-03 a 2026-10-23.
+  `quant_validate_walk_forward` empieza el primer pliegue de entrenamiento el 2024-02-01: las
+  operaciones de 2021 a 2023 (203 de 394, incluido 2022 con -549,7) no entran en ningún pliegue.
+- Con `train_frac: 0.7` esperaba 276 operaciones de entrenamiento; cada pliegue tiene 68 a 72.
+- El resumen es "3 robust / 1 overfit" y `strategy_results_read` muestra `wfo_verdict: "robust"`. El
+  pliegue "overfit" es el más reciente (mayo a octubre de 2026, Sharpe fuera de muestra -0,0811).
+- Propuesta: usar todo el historial, explicar la ventana de cada pliegue y que el veredicto global
+  tenga en cuenta el pliegue más reciente.
 
-### B5. Más historial en `run_pine_script`
-- **Qué hacía:** preparar una versión en Pine de las estrategias para comprobarla contra Python.
-- **Qué falló (no probado, por la descripción):** el tope de 10.000 velas recientes son unas 36 sesiones
-  en 5 minutos si incluye horario extendido, poco para evaluar una estrategia.
-- **Propuesta:** cargar solo el horario regular, o ejecutar por tramos, y devolver la lista de operaciones
-  para poder compararla con otro motor.
+**F5. Tres números de "confianza" distintos para la misma estrategia**
+- Misma ejecución (394 operaciones): `strategy_results_read` da `overall_confidence_pct: 46` y
+  `overall_verdict: MARGINAL`; `quant_validate_deflated_sharpe` da `confidence_pct: 76.58` y
+  "needs more evidence"; el walk-forward da "robust".
+- El Sharpe también difiere: 0,2983 en la ficha de resultados (diario, equity realizada) y 0,0359 en el
+  Sharpe deflactado, sin unidad ni base indicada.
+- `trials: 1` aunque la estrategia está en la versión 3 de su especificación (se cuentan solo las
+  especificaciones backtesteadas).
+- Propuesta: un único veredicto con la base de cada número, y que `trials` explique qué cuenta.
 
-### B6. Corrección por pruebas múltiples en los barridos
-- **Qué hacía:** probar 14.580 combinaciones de reglas y elegir las 10 mejores con 2025 y 2026.
-- **Qué falló:** las 10 daban t de 1,7 a 3,1 en esos dos años y promediaron -0,033 R en 2024, que no se
-  usó para elegir. Con tantas combinaciones, la mejor sale buena por azar.
-- **Propuesta (no probé `quant_sweep_*`; si ya lo hacen, ignorar):** que los barridos informen el número
-  efectivo de pruebas independientes, calculen el Sharpe corregido y reserven un periodo de validación
-  por defecto.
+**F6. "NY open VWAP reversal MNQ": 9 operaciones y una confianza del 63%**
+- `overall_verdict: "INSUFFICIENT SAMPLE"` (9 operaciones, 30 necesarias) junto a
+  `overall_confidence_pct: 63`, win rate 66,67% y expectativa +0,67 R.
+- `report_key_takeaways` dice que 140 señales caracterizadas no se reconciliaron, frente a 9 entradas.
+  No hay motivo por señal. Podría ser un fallo del motor o una consecuencia de los filtros.
+- `exit_reason` viene `null` en las 5 peores operaciones. En la operación 6 (long, 2025-06-05, stop de
+  30,75 puntos) la salida fue 5 minutos después con -58,5 puntos (-118,6 USD, 1,9 R): comprobar el
+  modelo de relleno del stop.
+- Propuesta: no mostrar confianza cuando la muestra es insuficiente, dar el motivo de cada señal no
+  reconciliada y rellenar `exit_reason`.
+
+**F7. `strategy_dna` clasifica mal una reversión y pone nombre provisional**
+- "NY open VWAP reversal MNQ": `factor_loadings: {trend: 0.3}`, sin carga de reversión a la media; el
+  artefacto se titula "DNA: MNQ discovery strategy" (el nombre provisional).
+- `list_strategies` tiene 3 de 10 estrategias con `name_is_placeholder: true`.
+- Propuesta: calcular la carga de reversión y nombrar automáticamente desde la especificación.
+
+**F8. `evaluate_edge` es correcto, pero repite sus datos unas diez veces**
+- Verificación positiva: con las 178 operaciones de 2024 de una idea mía devolvió n 178, expectativa
+  -0,0449, t -0,498, win rate 38,76% y PF 0,92, idéntico a mi cálculo en Python.
+- Pero las 178 cifras aparecen unas diez veces en la respuesta (en `data`, en `meta.args`, en
+  `categoryMeta.contract.settings` y de nuevo dentro de `frames`). Una respuesta de cuatro números ocupa
+  más de 12.000 caracteres.
+- Propuesta: devolver los argumentos una vez, y aceptar un `run_id` en lugar de pegar las operaciones.
+
+### Datos y respuestas (observados antes)
+
+**F9. `query_data` repite las filas.** 396 filas dieron 95.163 caracteres: las filas van en el artefacto
+y otra vez en `frames`, además de 50 en `data.rows`. Superó el límite del cliente y quedó en archivo.
+Propuesta: devolverlas una sola vez.
+
+**F10. `market_ohlcv` no devuelve la ventana.** ES, 5m, 120 días: `summary.bars = 23568` y
+`recent_bars` trae 10. Propuesta: devolver o paginar las filas, o aclarar que solo da un resumen.
+
+**F11. Volumen de futuros continuos distorsionado antes de cada vencimiento.** En ES, el volumen de 09:30
+a 11:00 cae por debajo del 50% de la mediana (362.602) el 17 a 19 de marzo, 15 a 19 de junio y 14 y 15
+de septiembre de 2026, además de festivos. Propuesta: cambiar de contrato por volumen e indicar el
+contrato o la semana de vencimiento.
+
+**F12. `market_coverage`.** MES muestra `history_start: 2026-10-17` mientras la profundidad real es
+2019-05-05, y la llamada tardó unos 29 s. Propuesta: usar la primera barra guardada.
+
+**F13. `strategy_results_read` con ruido.** Para 394 operaciones devuelve un `futures_sizing.ledger` de
+200 filas con riesgo por operación (más de 30.000 caracteres) cuando lo útil son unos 20 números.
+Propuesta: omitir el libro de riesgo salvo petición.
+
+**F14. Consultas en UTC.** Para seleccionar 09:30-11:00 de Nueva York filtré 13:30-14:55 UTC, válido
+solo con horario de verano; tuve que descartar unos cuatro meses por año. Propuesta: parámetro `session`.
+
+**F15. Texto de relleno.** Cada respuesta de `query_data` suma unos 1.900 caracteres de avisos sobre la
+fuente de acciones, incluso en futuros.
+
+**F16. Desconexiones intermitentes del servidor.** La lista de herramientas se marcó varias veces como
+no disponible y de nuevo disponible durante la sesión. Puede ser del cliente o del proxy.
 
 ## Lo que funcionó bien
-`query_data` responde en 15-50 ms, hay datos de ES y NQ desde 2016, los avisos de honestidad de datos
-son claros y los artefactos permiten recuperar resultados grandes.
+`evaluate_edge` coincidió con mi cálculo, `strategy_results_read` y `quant_validate_*` respondieron en
+100 a 350 ms, hay datos de ES y NQ desde 2016, y los avisos de honestidad de datos son claros.
