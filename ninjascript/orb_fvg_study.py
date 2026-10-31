@@ -145,6 +145,12 @@ if __name__ == "__main__":
     ap.add_argument("--cost", type=float, default=0.6)
     ap.add_argument("--min-gap", type=float, default=1.0)
     ap.add_argument("--min-day-ratio", type=float, default=0.5)
+    ap.add_argument("--min-rel-mid", type=float, default=None,
+                    help="also report only trades whose gap middle candle volume is >= this multiple")
     a = ap.parse_args()
     res, broke, with_gap = run(load(a.csv), a.lookback, a.entry_until, a.min_day_ratio, a.min_gap)
     report(res, broke, with_gap, a.cost)
+    if a.min_rel_mid is not None:
+        print(f"##### only rel_mid >= {a.min_rel_mid} #####")
+        for name, t in res[res["rel_mid"] >= a.min_rel_mid].groupby("variant"):
+            print(name, summarize(t, a.cost).to_dict())
