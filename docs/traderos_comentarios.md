@@ -27,3 +27,10 @@ como preguntas o sugerencias, no como errores. La evidencia detallada está en `
    estándar y volumen relativo por vela.
 9. **Conexión de solo lectura:** entiendo que es por seguridad. Un mensaje más claro al rechazar una
    acción, con el motivo, ayudaría.
+10. **GEX de contratos micro:** el mismo instante (2026-10-30 20:45 UTC) da niveles distintos para NQ y
+    MNQ (punto de giro 30.007 frente a 29.152; put wall 28.000 frente a 27.000) y para ES y MES (giro
+    7.810 frente a 8.222, este último muy por encima del precio). Como los contratos micro tienen poco
+    interés abierto, quizá convenga avisar de que el GEX de MNQ y MES es menos fiable que el de NQ y ES.
+11. **`get_gex` con el mercado cerrado:** devuelve `freshness.status: "live"` para un dato de hace un día
+    y con el mercado cerrado, mientras `market_gex_report` sí avisa de que no es en vivo. Unificar la
+    etiqueta evitaría confusiones.
