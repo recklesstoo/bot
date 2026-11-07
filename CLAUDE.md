@@ -28,3 +28,8 @@ Solo se analizan estos futuros micro: **MNQ** (Nasdaq-100), **MES** (S&P 500) y 
 - Las series continuas no están ajustadas por rolls: avisar siempre de saltos en días de roll.
 - Cotizaciones fuera de horario se reportan como "último precio" con su hora (ET), nunca como precio actual.
 - Ejecución/exportación: `strategy_export_ninjascript` genera código NinjaScript; no hay conexión directa a NinjaTrader.
+
+## Sesiones operadas
+- **Asia:** apertura de Tokio, 19:00 Bogotá (00:00 UTC). Informe de Murphy antes de esa hora.
+- **Nueva York:** apertura 9:30 ET. Se define en hora ET porque Bogotá (UTC-5, sin horario de verano) se desfasa con el cambio de EE. UU.
+- Las noticias no son determinantes en el intradía: los informes priorizan niveles, GEX, volatilidad y calendario programado.
