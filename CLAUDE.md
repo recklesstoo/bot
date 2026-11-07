@@ -21,3 +21,10 @@ Equipo de 5 agentes (en `.claude/agents/`). Su función es **investigar, probar,
 6. Los informes no dan señales de compra/venta: dan contexto y decisiones pendientes con plazo.
 7. Cada informe revisa el anterior (en qué acertó, en qué falló, qué cambió).
 8. Los entregables se guardan en `reports/` con fecha y autor.
+
+## Universo de instrumentos
+Solo se analizan estos futuros micro: **MNQ** (Nasdaq-100), **MES** (S&P 500) y **MGC** (oro).
+- Datos: servidor MCP `traderos` (precio 1m–1d desde 2019 para MNQ/MES y 2016 para MGC; GEX solo MNQ y MES; opciones: sin verificar).
+- Las series continuas no están ajustadas por rolls: avisar siempre de saltos en días de roll.
+- Cotizaciones fuera de horario se reportan como "último precio" con su hora (ET), nunca como precio actual.
+- Ejecución/exportación: `strategy_export_ninjascript` genera código NinjaScript; no hay conexión directa a NinjaTrader.
