@@ -41,3 +41,25 @@ Con objetivo de 0,5R el sistema necesita ganar **más del 66,7 %** de las veces 
 ## Reglas del equipo que aplican
 - Aarons investiga, **no valida su propio resultado**; Prado audita. Nadie decide operar: decide el trader.
 - Todo dato con fuente y hora; lo no verificable, SIN CONFIRMAR.
+
+---
+## Anexo 2026-11-09: estudio descriptivo de rupturas del rango de apertura (TraderOS `market_orb_study`)
+Fuente: TraderOS · ventana de 250 días naturales (175 sesiones, aprox. mar-nov 2026) · cierre de vela de 5 min · "held" = el precio cierra la sesión más allá del nivel roto. **Es un estudio de eventos: no hay stop, objetivo, VWAP, costes ni P&L.**
+
+| Rango (min) | NQ held | ES held |
+|---|---|---|
+| 5 | 52,0 % (n=175) | 56,0 % (n=175) |
+| 15 | 49,1 % (n=175) | 54,6 % (n=174) |
+| 30 | 55,0 % (n=169) | 57,0 % (n=172) |
+
+Lectura: con n≈175 el error típico de cada cifra es ≈ ±3,8 puntos; las diferencias entre longitudes de rango y entre NQ y ES no son distinguibles del azar. Un día (5-nov, ruptura bajista de ~4 %) aporta gran parte del recorrido medio; muestra de un solo régimen. Este dato NO equivale a "acertar el objetivo de 0,5R": no se puede comparar con el 66,7 % de equilibrio.
+
+## Combinaciones a probar (pre-registrar antes de medir; máx. ~12 variantes)
+Ejes (SSM base = rango 5 min, cierre de 5 min sobre OR y VWAP, stop = extremo de la vela de confirmación, objetivo 0,5R):
+1. Longitud del OR: 5 / 15 / 30 min.
+2. Filtro VWAP: con / sin.
+3. Confirmación: cierre / mecha.
+4. Objetivo: 0,5R / 1R / 2R / sin objetivo (cierre de sesión).
+5. Stop: extremo de la vela de confirmación / lado opuesto del OR.
+6. Dirección: ambas / solo a favor de la tendencia diaria.
+Instrumentos: MNQ y MES (MGC solo como control). Siempre contra el rival aleatorio con la misma gestión.
